@@ -1,0 +1,26 @@
+{
+  "name": "Scanpocket DEV",
+  "short_name": "Scanpocket DEV",
+  "description": "Your Inventory. In Your Pocket. Inventaire de pièces par scan de codes-barres, avec synchronisation.",
+  "lang": "fr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FFFFFF",
+  "theme_color": "#7C3AED",
+  "icons": [
+    {
+      "src": "../icon-splash-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "../icon-splash-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
