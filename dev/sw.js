@@ -6,12 +6,11 @@ var TEST = true;
 var PREFIX = TEST ? 'inventaire-dev-v' : 'inventaire-v';
 var V = PREFIX + VERSION_CACHE;
 var FAM = new RegExp('^' + PREFIX + '\\d+$');
-var LIB = 'https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';
 
 self.addEventListener('install', function (e) {
   e.waitUntil(
     caches.open(V).then(function (c) {
-      return Promise.all(['./', LIB].map(function (u) { return c.add(u).catch(function () {}); }));
+      return Promise.all(['./'].map(function (u) { return c.add(u).catch(function () {}); }));
     }).then(function () { return self.skipWaiting(); })
   );
 });
