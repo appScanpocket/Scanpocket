@@ -313,8 +313,9 @@ var KA = 'inventaire_auth_v1';
 var Session = (function () {
   var auth = ld(KA, null), ecoutes = [];
   if (!auth || !auth.refresh || !auth.email) auth = null;
-  /* code = identite de l'auteur courant (ecrite dans by / cb / db / finBy) ; aujourd'hui l'adresse en minuscules, la fiche de la personne le fournira plus tard (definirCode) */
-  if (auth) auth.code = String(auth.email).toLowerCase();
+  /* code = identite de l'auteur courant (ecrite dans by / cb / db / finBy) : celui de la fiche /allowed, garde avec la session (definirCode) pour rester disponible hors ligne ;
+     VIDE tant que la fiche n'a pas ete lue ou si elle n'a pas de code : jamais l'adresse. Une ancienne session qui gardait l'adresse comme code est remise a vide. */
+  if (auth && (typeof auth.code !== 'string' || auth.code === String(auth.email).toLowerCase())) auth.code = '';
 
   function prevenir() { ecoutes.forEach(function (f) { f(auth); }); }
   function idt(chemin, corps) {
@@ -323,7 +324,7 @@ var Session = (function () {
   }
   function garder(j) {
     var email = j.email || (auth && auth.email);
-    var code = (auth && auth.email === email && auth.code) || String(email).toLowerCase();
+    var code = (auth && auth.email === email && auth.code) || ''; /* un renouvellement du jeton garde le code ; une nouvelle connexion repart de vide */
     auth = { email: email, code: code, refresh: j.refreshToken || j.refresh_token, token: j.idToken || j.id_token, exp: Date.now() + (parseInt(j.expiresIn || j.expires_in, 10) || 3600) * 1000 };
     sv(KA, auth); prevenir(); return auth;
   }
@@ -331,8 +332,8 @@ var Session = (function () {
 
   return {
     courante: function () { return auth; },
-    /* profil charge a la connexion (Roles.charger) : fixe le code de la personne connectee */
-    definirCode: function (code) { if (auth && code) auth.code = String(code); },
+    /* profil charge a la connexion (Roles.charger) : fixe le code de la personne connectee, '' si sa fiche n'en a pas ; garde dans la session pour le hors ligne */
+    definirCode: function (code) { if (!auth) return; var c = typeof code === 'string' ? code : ''; if (auth.code !== c) { auth.code = c; sv(KA, auth); } },
     surChangement: function (f) { ecoutes.push(f); },
     /* l'adresse envoyee a Firebase est toujours sans espaces autour et en minuscules (adresseNormalisee) */
     seConnecter: function (email, mdp) { return idt('accounts:signInWithPassword', { email: adresseNormalisee(email), password: mdp, returnSecureToken: true }).then(garder); },
@@ -359,7 +360,7 @@ var Session = (function () {
 })();
 
 /* Identite, trois fonctions distinctes :
-   - auteurCourant() : « moi » = le CODE de l'auteur, ecrit dans by / cb / db / finBy et compare pour savoir « est-ce moi ? » (aujourd'hui = l'adresse) ;
+   - auteurCourant() : « moi » = le CODE de l'auteur, ecrit dans by / cb / db / finBy et compare pour savoir « est-ce moi ? » ; '' tant que la fiche n'est pas lue ou n'a pas de code ;
    - emailDuCompte() : l'adresse de connexion en minuscules, pour identifier la personne aupres du systeme (cle /allowed, jeton, roles) et l'afficher dans « Compte » ;
    - monAlias() : le nom a afficher pour moi (voir aliasDe, socle\demandes.js). */
 function auteurCourant() { return String((Session.courante() || {}).code || ''); }
@@ -440,9 +441,15 @@ function etatAcces(auth, roles) {
 }
 
 /* code de la personne connectee, lu dans sa fiche /allowed (fonction pure) : le champ `code` TEL QUEL (texte non vide, ni espaces retires ni majuscules changees) ;
-   '' si la fiche n'en porte pas (absente, ancien format texte, champ invalide ou « Code » en majuscule) : Session.definirCode ignore alors la valeur et le code de la session reste ce qu'il etait */
+   '' si la fiche n'en porte pas (absente, ancien format texte, champ invalide ou « Code » en majuscule) : Session.definirCode met alors le code de la session a vide (aucune ecriture signee possible) */
 function codeDeFiche(fiche) {
   return (fiche && typeof fiche === 'object' && typeof fiche.code === 'string') ? fiche.code : '';
+}
+/* Toute ecriture qui SIGNE un auteur (by / cb / db / finBy) exige un code de session : sinon la ligne serait refusee par les regles.
+   Renvoie '' si l'on peut ecrire, sinon le message clair a montrer (aucune ecriture n'est faite) : fiche pas encore lue, ou fiche sans code. */
+function refusSansCode() {
+  if (auteurCourant()) return '';
+  return Roles.liste() ? "Ta fiche n'a pas de code : demande à un Admin de la compléter, rien n'a été enregistré" : "Ta fiche n'est pas encore chargée : réessaie dans un instant, rien n'a été enregistré";
 }
 var Roles = (function () {
   var liste = null;
@@ -633,11 +640,11 @@ var RQD = { st: 1, name: 1, by: 1, qty: -1, t: -1 }, RQLAB = { st: 'Statut', nam
 var RQ_TRI = { c: [{ k: 't', d: -1 }] };
 var RQ_ORDRE = { attente: 0, approuvee: 1, partielle: 1, recue: 2, refusee: 2, cloturee: 2 };
 var RQ_STATUTS = ['attente', 'approuvee', 'partielle', 'recue', 'refusee', 'cloturee'];
-/* nom a afficher pour un auteur (le code de by / cb / db) : aujourd'hui la partie avant le @ ; plus tard le seul endroit qui cherchera l'alias par le code */
+/* nom a afficher pour un auteur (le code de by / cb / db) : son alias dans l'annuaire ; un code absent de l'annuaire s'affiche TEL QUEL (le code), une valeur vide reste vide ; aucun repli */
 function aliasDe(auteur) {
   if (auteur == null) return '';
   var a = aliasDansAnnuaire(Annuaire.lire(), auteur);
-  return a !== undefined ? a : String(auteur).split('@')[0];
+  return a !== undefined ? a : String(auteur);
 }
 /* qui peut decider voit toutes les demandes, les autres seulement les leurs */
 function demandesVisibles(demandes, roles, moi) {
@@ -873,22 +880,32 @@ function statutsPiece(it, tot, demandes) {
 }
 /* Accueil : cartes de « À traiter » et liste de « Mes dernières tâches » (calculs purs, aucun acces a l'ecran) */
 var RQL = { attente: 'En attente', refusee: 'Refusée', approuvee: 'Approuvée', partielle: 'Partiellement reçue', recue: 'Reçue', cloturee: 'Clôturée' };
-var COUL_CMD = '#D64545', COUL_ATT = '#FFC300', COUL_REC = '#F97316';
+var COUL_CMD = '#D64545', COUL_ATT = '#FFC300', COUL_REC = '#F97316', COUL_PER = '#8B5CF6';
 
 /* pieces sous leur seuil : { aCommander: sans demande en cours, deja: avec une demande qui couvre le besoin } */
 function separerSousSeuil(pieces, stocks, demandes) {
   var l = lignesACommander(pieces, stocks, demandes); /* meme calcul que l'ecran « Pieces a commander » */
   return { aCommander: l.a.length, deja: l.d.length };
 }
+/* demandes qui attendent la decision de cette personne : celles « en attente », seulement pour les roles qui decident (la carte « Demandes en attente » et la pastille de l'icone) */
+function demandesADecider(roles, demandes) {
+  return peut('decide', roles) ? (demandes || []).filter(function (x) { return x.st === 'attente'; }).length : 0;
+}
 /* cartes de « À traiter » selon le role. Renvoie [{ id, titre, sous, n, couleur, sombre }] ; vide = « Rien a traiter » */
-function cartesATraiter(roles, moi, demandes, pieces, stocks) {
+function cartesATraiter(roles, moi, demandes, pieces, stocks, parLigne, aujourdhui, horizon) {
   var c = [], compte = function (liste, etats) { return liste.filter(function (x) { return etats.indexOf(x.st) > -1; }).length; };
   var miennes = demandes.filter(function (x) { return String(x.r.by) === moi; });
   var sp = separerSousSeuil(pieces, stocks, demandes);
   if (sp.aCommander > 0) c.push({ id: 'cmd', titre: 'Articles à commander', sous: 'sous leur seuil de commande' + (sp.deja ? ' · ' + sp.deja + ' déjà demandé(s)' : ''), n: sp.aCommander, couleur: COUL_CMD });
+  /* peremptions : lignes perimees ou dans l'horizon de l'espace (reglage Admin, 30 jours par defaut), pour ceux qui gerent le stock (droit « inv » : Admin, SuperUser, Inventaire) ; la carte n'existe que s'il y en a */
+  if (parLigne && peut('inv', roles)) {
+    var hz = Number(horizon) > 0 ? Number(horizon) : PEREMPTION_HORIZON;
+    var pr = lignesAPeremption(pieces, parLigne, hz, aujourdhui || todayIso()), np = pr.perimees.length + pr.proches.length;
+    if (np) c.push({ id: 'per', titre: 'Péremptions', sous: pr.perimees.length + ' périmée(s), ' + pr.proches.length + ' dans les ' + hz + ' jours', n: np, couleur: COUL_PER });
+  }
   var k;
   if (peut('decide', roles)) {
-    k = compte(demandes, ['attente']);
+    k = demandesADecider(roles, demandes);
     if (k) c.push({ id: 'att', titre: 'Demandes en attente', sous: 'à approuver ou refuser', n: k, couleur: COUL_ATT, sombre: true });
   } else {
     k = compte(miennes, ['attente', 'approuvee', 'partielle']);
@@ -912,6 +929,78 @@ function dernieresTaches(lignes, moi) {
 }
 /* resume d'une tache (ligne de l'en-tete du bloc) : « Sortie (4) · nom de l'article » */
 function texteTache(x, nomPiece) { return typeMouvement(x).titre + ' · ' + nomPiece; }
+/* Pastille sur l'icone de l'application installee (API Badging, navigator.setAppBadge) : le nombre de demandes qui attendent la decision de CETTE personne
+   (le meme nombre que la carte « Demandes en attente » de l'accueil, donc seulement pour les roles qui decident). Mise a jour a l'ouverture, au retour sur l'application et apres chaque synchro ;
+   effacee quand il n'y a plus rien et a la deconnexion. Navigateur sans cette API : on ne fait rien, sans message. Le nombre n'est mis a jour que lorsque l'application est ouverte. */
+var Badge = (function () {
+  var dernier = -1; /* dernier nombre applique : pas d'appel inutile */
+  function api(nom, n) {
+    try { var r = n === undefined ? navigator[nom]() : navigator[nom](n); if (r && r.catch) r.catch(function () { /* refuse par le systeme : sans effet */ }); } catch (e) { /* API absente ou refusee : on ne fait rien */ }
+  }
+  function appliquer(n) {
+    if (n === dernier) return; dernier = n;
+    if (typeof navigator === 'undefined') return;
+    if (n > 0 && typeof navigator.setAppBadge === 'function') api('setAppBadge', n);
+    else if (typeof navigator.clearAppBadge === 'function') api('clearAppBadge');
+  }
+  Session.surChangement(function (auth) { if (!auth) appliquer(0); }); /* deconnexion volontaire ou expiration de la session */
+  return {
+    /* nombre de demandes a decider pour ces roles (calcul pur : demandesADecider, socle\accueil_taches.js) */
+    appliquerDepuis: function (roles, demandes) { appliquer(demandesADecider(roles, demandes)); },
+    maj: function () { if (Session.courante()) Badge.appliquerDepuis(Roles.liste(), Journal.contexte().demandes || []); },
+    effacer: function () { appliquer(0); }
+  };
+})();
+/* Articles dormants (calculs purs, aucun acces a l'ecran ni au reseau), a partir du journal complet gardé sur l'appareil.
+   - « sans mouvement » : aucun mouvement de stock (entree, sortie, import, reception, inventaire) depuis N mois ; un article tout neuf (cree depuis moins de N mois) n'est pas dormant ;
+   - « a recompter » : jamais compte (aucun mouvement « inventaire »), ou dernier comptage de plus de N mois, pour un article qui a du stock (un stock nul n'est pas a compter) ; « jamais compte » est repere a part.
+   Un article peut etre dans les deux listes. */
+var DORMANT_MOIS = 6;
+var DORMANT_MOIS_CHOIX = [[3, '3 mois'], [6, '6 mois'], [12, '12 mois'], [18, '18 mois'], [24, '24 mois']];
+var DORMANT_TYPES = ['entree', 'sortie', 'import', 'reception', 'inventaire'];
+/* instant (ms) il y a `mois` mois calendaires */
+function ilYaMois(maintenant, mois) { var d = new Date(maintenant); d.setMonth(d.getMonth() - mois); return d.getTime(); }
+/* nombre de mois entiers ecoules entre t et maintenant */
+function moisEcoules(t, maintenant) {
+  var a = new Date(t), b = new Date(maintenant), m = (b.getFullYear() - a.getFullYear()) * 12 + b.getMonth() - a.getMonth();
+  if (b.getDate() < a.getDate()) m--;
+  return Math.max(0, m);
+}
+/* pieces = fiches vivantes ; lignes = journal (Journal.contexte().lignes) ; stocks = Journal.contexte().stocks ; mois = N ; maintenant = ms.
+   Renvoie { sansMouvement, aRecompter, mois, seuil } ; chaque element = { it, stock, dernier (ms ou 0), jamais (vrai : jamais compte), mois (entiers, 0 si jamais) } ; les plus anciens d'abord (jamais compte en tete) */
+function articlesDormants(pieces, lignes, stocks, mois, maintenant) {
+  var n = Number(mois) > 0 ? Number(mois) : DORMANT_MOIS, seuil = ilYaMois(maintenant, n), dernierMv = {}, dernierInv = {};
+  (lignes || []).forEach(function (m) {
+    if (!m || !m.code || !m.t || DORMANT_TYPES.indexOf(m.type) < 0) return;
+    if (!(dernierMv[m.code] >= m.t)) dernierMv[m.code] = m.t;
+    if (m.type === 'inventaire' && !(dernierInv[m.code] >= m.t)) dernierInv[m.code] = m.t;
+  });
+  var sansMouvement = [], aRecompter = [];
+  (pieces || []).forEach(function (it) {
+    if (!it || it.del) return;
+    var st = stockFrom(stocks || {}, it), cree = it.c || it.t || 0;
+    var mv = dernierMv[it.code] || 0, ref = Math.max(mv, cree);
+    if (ref < seuil) sansMouvement.push({ it: it, stock: st, dernier: mv, jamais: false, mois: moisEcoules(ref, maintenant), reference: ref });
+    var inv = dernierInv[it.code] || 0;
+    if (st !== 0 && (!inv || inv < seuil) && (inv || cree < seuil)) aRecompter.push({ it: it, stock: st, dernier: inv, jamais: !inv, mois: inv ? moisEcoules(inv, maintenant) : moisEcoules(cree, maintenant), reference: inv || cree });
+  });
+  var tri = function (a, b) { return a.reference - b.reference || String(a.it.name).localeCompare(String(b.it.name), 'fr'); };
+  return { sansMouvement: sansMouvement.sort(tri), aRecompter: aRecompter.sort(function (a, b) { return (b.jamais - a.jamais) || tri(a, b); }), mois: n, seuil: seuil };
+}
+/* articles distincts des deux listes (pour la session d'inventaire), dans l'ordre : ceux a recompter d'abord */
+function codesDormants(r) {
+  var vus = {}, out = [];
+  r.aRecompter.concat(r.sansMouvement).forEach(function (x) { if (!vus[x.it.code]) { vus[x.it.code] = 1; out.push(x.it.code); } });
+  return out;
+}
+/* lignes du fichier Excel */
+function lignesTableurDormants(r) {
+  var rows = [['Liste', 'Article', 'Code', 'Stock', 'Dernier mouvement', 'Dernier comptage', 'Mois']];
+  var jour = function (t) { return t ? dateHeure(t).slice(0, 10) : ''; };
+  r.aRecompter.forEach(function (x) { rows.push([x.jamais ? 'Jamais compté' : 'À recompter', x.it.name, x.it.code, x.stock, '', jour(x.dernier), x.jamais ? '' : x.mois]); });
+  r.sansMouvement.forEach(function (x) { rows.push(['Sans mouvement', x.it.name, x.it.code, x.stock, jour(x.dernier), '', x.mois]); });
+  return rows;
+}
 /* Stockage local (IndexedDB) : meme base, memes magasins que l'ancienne application, donc memes donnees.
    it = pieces (cle code), sn = sauvegardes locales (cle t), mv = journal des mouvements (cle id). Aucun acces a l'ecran. */
 var SFX = '_' + ENV.room;
@@ -981,6 +1070,101 @@ var Stockage = (function () {
     /* deconnexion volontaire : efface TOUT le journal local, lignes pas encore envoyees comprises, et les copies de securite */
     viderToutLeJournal: function () { return tx('readwrite', function (s) { s.clear(); }, 'mv').catch(function () { /* rien */ }); },
     viderSauvegardes: function () { return tx('readwrite', function (s) { s.clear(); }, 'sn').catch(function () { /* rien */ }); }
+  };
+})();
+/* Peremptions a traiter (calculs purs, aucun acces a l'ecran ni au reseau) : les lignes de stock PERIMEES ou dont la date tombe dans les N prochains jours.
+   Une ligne de stock porte pe (texte, normalement AAAA-MM-JJ) et son stock par ligne vient du journal (stocksParLigne). Seules les lignes AYANT DU STOCK comptent (une ligne vide n'est pas a traiter) ;
+   une date qui n'est pas au format AAAA-MM-JJ valide est comptee a part (illisibles), jamais devinee. */
+var PEREMPTION_HORIZON = 30;
+var PEREMPTION_HORIZONS = [[7, '7 jours'], [15, '15 jours'], [30, '30 jours'], [60, '60 jours'], [90, '90 jours'], [180, '180 jours']];
+/* 'AAAA-MM-JJ' s'il s'agit d'une vraie date du calendrier, sinon '' */
+function jourPeremption(pe) {
+  var s = String(pe == null ? '' : pe).trim(), m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return '';
+  var d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return (d.getUTCFullYear() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[3])) ? s : '';
+}
+/* nombre de jours entiers entre deux dates 'AAAA-MM-JJ' (b - a) */
+function ecartJours(a, b) {
+  var p = function (s) { var m = s.split('-'); return Date.UTC(Number(m[0]), Number(m[1]) - 1, Number(m[2])); };
+  return Math.round((p(b) - p(a)) / 86400000);
+}
+/* pieces = fiches vivantes ; parLigne = Journal.contexte().parLigne ({code: {idLigne: variation}}) ; horizon = N jours ; aujourdhui = 'AAAA-MM-JJ'.
+   Renvoie { perimees, proches, illisibles, horizon } ; perimees / proches = [{ it, l, pe, q, jours }] triees par date (jours < 0 : perimee depuis |jours| jours) */
+function lignesAPeremption(pieces, parLigne, horizon, aujourdhui) {
+  var n = Number(horizon) > 0 ? Number(horizon) : PEREMPTION_HORIZON, perimees = [], proches = [], illisibles = 0;
+  (pieces || []).forEach(function (it) {
+    if (!it || it.del) return;
+    var st = stocksParLigne(it, (parLigne || {})[it.code]);
+    linesOf(it).forEach(function (l) {
+      var pe = String(l.pe == null ? '' : l.pe).trim(), q = st[l.id];
+      if (!pe || !(q > 0)) return;
+      var iso = jourPeremption(pe);
+      if (!iso) { illisibles++; return; }
+      var j = ecartJours(aujourdhui, iso), x = { it: it, l: l, pe: iso, q: q, jours: j };
+      if (j < 0) perimees.push(x); else if (j <= n) proches.push(x);
+    });
+  });
+  var tri = function (a, b) { return a.pe < b.pe ? -1 : a.pe > b.pe ? 1 : String(a.it.name).localeCompare(String(b.it.name), 'fr'); };
+  return { perimees: perimees.sort(tri), proches: proches.sort(tri), illisibles: illisibles, horizon: n };
+}
+/* texte d'une ligne : « Lot L-2210 · Allée A · 8 unités » (le magasin n'est cite que s'il n'est pas le principal) */
+function detailLignePeremption(x) {
+  var l = x.l, p = [];
+  if (l.lt) p.push('Lot ' + l.lt);
+  if (l.mg && l.mg !== DEFMAG) p.push(l.mg);
+  if (l.em) p.push(l.em);
+  p.push(fmt(x.q) + ' ' + (l.un ? l.un : (x.q > 1 ? 'unités' : 'unité')));
+  return p.join(' · ');
+}
+/* lignes du fichier Excel de la liste */
+function lignesTableurPeremptions(r) {
+  var rows = [['Statut', 'Article', 'Code', 'Lot', 'Magasin', 'Emplacement', 'Stock', 'Unité', 'Date de péremption', 'Jours']];
+  var ajouter = function (statut, x) { rows.push([statut, x.it.name, x.it.code, x.l.lt || '', x.l.mg || DEFMAG, x.l.em || '', x.q, x.l.un || '', frDate(x.pe), x.jours]); };
+  r.perimees.forEach(function (x) { ajouter('Périmée', x); });
+  r.proches.forEach(function (x) { ajouter('Dans les ' + r.horizon + ' jours', x); });
+  return rows;
+}
+/* options de l'horizon : les choix habituels, plus la valeur du reglage de l'espace si elle n'y est pas (ex. 45), du plus court au plus long */
+function horizonsPeremption(valeurs) {
+  var l = PEREMPTION_HORIZONS.slice();
+  (valeurs || []).forEach(function (jours) { if (!l.some(function (x) { return x[0] === jours; })) l.push([jours, jours + ' jours']); });
+  return l.sort(function (a, b) { return a[0] - b[0]; });
+}
+/* message ou '' : l'horizon est un nombre entier de jours, de 1 a 365 (meme regle que les regles Firebase v270) */
+function controlerHorizonPeremption(texte) {
+  var s = String(texte == null ? '' : texte).trim(), n = Number(s);
+  return (s !== '' && isFinite(n) && n >= 1 && n <= 365 && n % 1 === 0) ? '' : 'L\'horizon est un nombre entier de jours, de 1 à 365';
+}
+/* REGLAGE DE L'ESPACE reglages/peremption = { jours, t, by } (30 par defaut, modifiable par un Admin) : meme valeur pour la carte de l'accueil, l'ecran Peremptions (choix de depart) et l'e-mail planifie (Code.gs).
+   Garde sur l'appareil pour le hors ligne ; relu au plus toutes les 5 minutes. */
+var KPER = 'inventaire_peremption_v1' + SFX;
+var Peremption = (function () {
+  var jours = Number(ld(KPER, PEREMPTION_HORIZON)), derniere = 0;
+  if (controlerHorizonPeremption(jours)) jours = PEREMPTION_HORIZON;
+  return {
+    jours: function () { return jours; },
+    /* lit le reglage sur le serveur ; true si la valeur a change ; jamais d'erreur */
+    charger: function (force) {
+      if (!Session.courante() || !navigator.onLine || (!force && Date.now() - derniere < 300000)) return Promise.resolve(false);
+      return Donnees.lireChemin('reglages/peremption').then(function (v) {
+        derniere = Date.now();
+        var n = v && typeof v === 'object' ? Number(v.jours) : NaN;
+        if (controlerHorizonPeremption(n)) n = PEREMPTION_HORIZON; /* absent ou invalide : 30 */
+        if (n === jours) return false;
+        jours = n; sv(KPER, n); return true;
+      }).catch(function () { return false; });
+    },
+    /* Admin : ecrit le reglage ; renvoie { ok, message } */
+    ecrire: function (texte) {
+      var msg = controlerHorizonPeremption(texte); if (msg) return Promise.resolve({ ok: false, message: msg });
+      var n = Number(String(texte).trim());
+      return Donnees.ecrire('PUT', { jours: n, t: Date.now(), by: auteurCourant() }, 'reglages/peremption').then(function () {
+        jours = n; sv(KPER, n); return { ok: true, message: 'Horizon enregistré : ' + n + ' jours' };
+      }, function (e) { return { ok: false, message: e && e.message === 'nocode' ? 'Réglage non enregistré' : 'Réglage non enregistré (réservé aux Admin)' }; });
+    },
+    /* deconnexion volontaire : on oublie le reglage de l'espace */
+    oublier: function () { jours = PEREMPTION_HORIZON; derniere = 0; del(KPER); }
   };
 })();
 /* Une piece : fonctions pures (aucun acces a l'ecran, au stockage ni au reseau) */
@@ -1239,12 +1423,14 @@ var Journal = (function () {
     },
     /* plusieurs lignes d'un coup, en une seule ecriture locale (transfert : sortie et entree ensemble) ; liste = [[code, delta, extra], ...] ; renvoie le nombre ajoute */
     ajouterPlusieurs: function (liste) {
+      var refus = refusSansCode(); if (refus) { toast(refus); return Promise.resolve(0); }
       var moi = auteurCourant(), recs = liste.map(function (a) { return creerLigne(a[0], a[1], a[2], moi); }).filter(Boolean);
       if (!recs.length) return Promise.resolve(0);
       return Stockage.ecrireLignes(recs).then(recalculer).then(function () { Donnees.apresEcriture(); return recs.length; });
     },
     /* ajoute une ligne sur cet appareil (envoyee ensuite par la synchro) ; true si elle est enregistree, false si l'identifiant impose existe deja ou si elle est vide */
     ajouter: function (code, delta, extra) {
+      var refus = refusSansCode(); if (refus) { toast(refus); return Promise.resolve(false); }
       var moi = auteurCourant(), rec = creerLigne(code, delta, extra, moi);
       if (!rec) return Promise.resolve(false);
       var ecrire = function () { return Stockage.ecrireLignes([rec]).then(recalculer).then(function () { Donnees.apresEcriture(); return true; }); };
@@ -1280,6 +1466,14 @@ var Donnees = (function () {
     });
   }
   var refuse = function (e) { return /^(400|401|403)$/.test(e && e.message); };
+  /* ecriture directe qui SIGNE un auteur (le corps porte « by », ou un lot dont chaque element le porte) : sans code de session, rien n'est envoye ; renvoie une promesse rejetee (message deja montre) ou null */
+  function refusSigne(methode, corps) {
+    if (methode === 'DELETE' || !corps || typeof corps !== 'object') return null;
+    var signe = corps.by !== undefined || Object.keys(corps).some(function (k) { return corps[k] && typeof corps[k] === 'object' && corps[k].by !== undefined; });
+    if (!signe) return null;
+    var refus = refusSansCode(); if (!refus) return null;
+    toast(refus); return Promise.reject(new Error('nocode'));
+  }
   /* envoie les lignes du journal creees sur cet appareil, par etapes (1 puis 2 puis 3) et par paquets de 2000 ;
      une ligne refusee par le serveur ne bloque pas les autres : elle est reessayee seule, puis laissee en attente */
   function envoyerJournal(t0) {
@@ -1315,6 +1509,9 @@ var Donnees = (function () {
   function marquerSale(code) { if (sales.indexOf(code) < 0) { sales.push(code); sv(KD, sales); } }
   /* envoie les fiches modifiees (PATCH sur items) ; une fiche modifiee entre-temps reste a envoyer */
   function envoyerPieces(t0) {
+    /* une fiche remplacee entre-temps par la version plus recente d'une AUTRE personne n'est plus a nous : on ne la renvoie pas (les regles exigent by = le code de l'auteur) */
+    var moi = auteurCourant();
+    if (moi) { var gardees = sales.filter(function (c) { var i = index[c]; return i !== undefined && pieces[i].by === moi; }); if (gardees.length !== sales.length) { sales = gardees; sv(KD, sales); } }
     if (!sales.length) return Promise.resolve();
     var up = {}, envoyes = {}, n = 0, paquets = [];
     sales.forEach(function (c) {
@@ -1414,14 +1611,16 @@ var Donnees = (function () {
     },
     /* ecrit une fiche (creation, modification, suppression, restauration) : gardee sur l'appareil, puis envoyee par la synchro */
     ecrirePiece: function (rec) {
+      var refus = refusSansCode(); if (refus) { toast(refus); return Promise.reject(new Error('nocode')); } /* la fiche porte by = mon code : sans code, rien n'est ecrit */
       var i = index[rec.code];
       if (i === undefined) { pieces.push(rec); index[rec.code] = pieces.length - 1; } else pieces[i] = rec;
       marquerSale(rec.code);
       return Stockage.ecrirePieces([rec]).then(function () { prevenir(); Donnees.apresEcriture(); });
     },
     /* ecriture directe d'un chemin de l'espace de donnees (photos...) ou de la racine (prix) */
-    ecrire: function (methode, corps, chemin) { return ecrireDistant(methode, corps, chemin); },
+    ecrire: function (methode, corps, chemin) { var r = refusSigne(methode, corps); return r ? r : ecrireDistant(methode, corps, chemin); },
     ecrireRacine: function (methode, corps, chemin) {
+      var r = refusSigne(methode, corps); if (r) return r;
       return Session.jeton().then(function (jeton) { return fetch(ENV.url.replace(/\/+$/, '') + '/' + chemin + '.json?auth=' + encodeURIComponent(jeton), { method: methode, body: corps === undefined ? undefined : JSON.stringify(corps) }); })
         .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); });
     },
@@ -1456,7 +1655,7 @@ var Donnees = (function () {
           return Journal.fusionner(rm).then(function () { cfg.msince = t0; if (mcomplet) cfg.mfull = t0; sv(KC, cfg); });
         });
       }).then(function () {
-        return Annuaire.charger(); /* annuaire des alias (lecture seule, jamais d'erreur) ; le prevenir() final redessine les ecrans */
+        return Annuaire.charger().then(function () { return Peremption.charger(); }); /* annuaire des alias, puis horizon des peremptions de l'espace (lecture seule, jamais d'erreur) ; le prevenir() final redessine les ecrans */
       }).then(function () {
         etat.dernierOk = Date.now(); etat.echec = false; return compterAttente();
       }).catch(function (e) {
@@ -1661,8 +1860,8 @@ var Magasins = (function () {
   };
 })();
 /* Annuaire des personnes : code -> alias, lu dans users/<espace> (LECTURE SEULE, a la racine de la base, comme prix/<espace>).
-   Cle d'une personne = son code avec « . » remplace par « , » (adresse ou U0001). Les fonctions pures ne lisent rien ; le module garde l'annuaire en memoire.
-   Echec de lecture, noeud absent, hors ligne : l'annuaire reste tel quel (vide au depart) et l'affichage retombe sur l'ancien comportement (aliasDe, socle\demandes.js). */
+   Cle d'une personne = son code TEL QUEL (U0001). Les fonctions pures ne lisent rien ; le module garde l'annuaire en memoire.
+   Echec de lecture, noeud absent, hors ligne : l'annuaire reste tel quel (vide au depart) et aliasDe (socle\demandes.js) affiche le code tel quel. */
 function cleAnnuaire(code) { return String(code == null ? '' : code); } /* la cle est le code TEL QUEL (U0001) : ni minuscules, ni espaces retires, ni « . » remplace */
 /* contenu de users/<espace> -> { cle: alias } ; les entrees sans alias texte sont ignorees */
 function annuaireDepuis(o) {
@@ -1713,7 +1912,7 @@ var Deconnexion = (function () {
   /* efface tout ce que l'appareil garde des donnees : copie locale complete, lignes en attente, copies de securite, file d'e-mails, date de derniere sauvegarde, annuaire */
   function vider() {
     return Stockage.viderToutLeJournal().then(function () { return Donnees.viderCopieLocale(); }).then(function () { return Stockage.viderSauvegardes(); })
-      .then(function () { del(KMQ); del(KSAUVJSON); Annuaire.vider(); });
+      .then(function () { del(KMQ); del(KSAUVJSON); Annuaire.vider(); Peremption.oublier(); });
   }
   return {
     enAttente: enAttente,
@@ -2141,8 +2340,8 @@ var ADM_CARTES = [
   { id: 'adm_externe', g: 'Données · Synchro · Sauvegardes · Photos', t: 'Synchro (système externe)', c: 'Synchro externe', d: 'Dernier import, dernière mise à jour, historique des repères.', droit: 'fiche' },
   { id: 'adm_sauvegardes', g: 'Données · Synchro · Sauvegardes · Photos', t: 'Sauvegardes', d: 'Copies de sécurité des données.', droit: 'backup' },
   { id: 'adm_photos', g: 'Données · Synchro · Sauvegardes · Photos', t: 'Photos', d: 'Réglage, export, import et entretien des photos.', droit: 'photo' },
-  { id: 'adm_effacer', g: 'Zone dangereuse', t: 'Tout effacer', d: 'Envoie tous les articles à la corbeille, sur tous les téléphones. Une sauvegarde est faite avant.', droit: 'danger', zone: true },
-  { id: 'adm_purge', g: 'Zone dangereuse', t: 'Supprimer tous les articles et tout le journal (serveur)', c: 'Suppression complète (serveur)', d: 'Supprime définitivement, sur le serveur et sur tous les appareils, les articles, le journal, les magasins et les photos de cet environnement. Réservé aux SuperAdmin.', droit: 'purge', zone: true },
+  { id: 'adm_effacer', g: 'Zone réservée', t: 'Tout effacer', d: 'Envoie tous les articles à la corbeille, sur tous les téléphones. Une sauvegarde est faite avant.', droit: 'danger', zone: true },
+  { id: 'adm_purge', g: 'Zone réservée', t: 'Supprimer tous les articles et tout le journal (serveur)', c: 'Suppression complète (serveur)', d: 'Supprime définitivement, sur le serveur et sur tous les appareils, les articles, le journal, les magasins et les photos de cet environnement. Réservé aux SuperAdmin.', droit: 'purge', zone: true },
   { id: 'adm_veille', g: 'Cet appareil', t: 'Mise en veille', d: 'Quand couper la caméra et la synchro de ce téléphone.', droit: '' },
   { id: 'adm_partage', g: 'Cet appareil', t: 'Partager un texte (essai)', c: 'Partager (essai)', d: 'Envoyer un code-barres ou un commentaire à une autre application.', droit: '' },
   { id: 'adm_etat', g: 'Cet appareil', t: 'État du système', d: 'Version, environnement, compte, rôles, dernière synchro.', droit: '' }
@@ -2158,6 +2357,7 @@ function entreesAdministration(roles) {
 var RAPPORTS = [
   { id: 'commander', g: 'Stock', t: 'Articles à commander', d: 'État actuel : ce qui est sous le seuil, avec la quantité proposée.', besoin: 'hist' },
   { id: 'valeur', g: 'Stock', t: 'Valeur du stock', d: 'Valeur à la date choisie : par magasin, par article ou par ligne.', besoin: 'prix' },
+  { id: 'dormants', g: 'Stock', t: 'Articles dormants', d: 'Sans mouvement ou à recompter depuis plusieurs mois, avec une session d\'inventaire en un clic.', besoin: 'hist' },
   { id: 'ecarts', g: 'Système externe', t: 'Écarts depuis un repère', c: 'Écarts', d: 'Ce qui a bougé depuis la dernière mise à jour du système externe.', besoin: 'hist' },
   { id: 'motifs', g: 'Mouvements', t: 'Mouvements par motif', c: 'Par motif', d: 'Casse, péremption, retour… sur une période.', besoin: 'hist' },
   { id: 'inventaires', g: 'Mouvements', t: 'Inventaires', d: 'Quantités comptées, avec export CODE-BARRES.QTÉ.', besoin: 'hist' },
@@ -2361,6 +2561,7 @@ function rapportEcarts(lignes, pieces, repere, tout) {
    Une session = { nom, t0 (debut), mg (magasin, '' = tous), by, aveugle (vrai : quantite attendue masquee), tv (ecart tolere), tu ('u' unites ou 'p' pour cent), fin, finBy }.
    Une ligne de stock est « comptee » dans une session si elle a un mouvement « inventaire » plus recent que le debut de la session : aucun stockage de comptage. */
 
+var SESSION_ARTICLES_MAX = 500; /* taille maximale de la liste d'articles d'une session (meme limite dans les regles Firebase v270) */
 /* cle d'une ligne de stock : code de la piece + identifiant de la ligne */
 function cleLigneInv(code, idLigne) { return code + '|' + idLigne; }
 /* ligne visee par un mouvement : celle qu'il nomme, sinon la premiere ligne de la piece (comme pour le stock par ligne) */
@@ -2377,11 +2578,14 @@ function dansLePerimetre(s, l) {
   return !s.em || fold(l.em).indexOf(fold(s.em)) === 0;
 }
 
+/* une session peut etre LIMITEE A UNE LISTE d'articles (champ cod : codes des articles, 500 au plus, cree depuis « Articles dormants ») : seules les lignes de ces articles font partie du perimetre */
+function codesDeSession(s) { return s && s.cod ? (Array.isArray(s.cod) ? s.cod : Object.keys(s.cod).map(function (k) { return s.cod[k]; })) : null; }
+function articleDansSession(s, code) { var c = codesDeSession(s); return !c || c.indexOf(code) > -1; }
 /* lignes du perimetre : [{ cle, it, l }] sur les fiches vivantes */
 function lignesDuPerimetre(s, pieces) {
   var out = [];
   (pieces || []).forEach(function (it) {
-    if (!it || it.del) return;
+    if (!it || it.del || !articleDansSession(s, it.code)) return;
     linesOf(it).forEach(function (l) { if (dansLePerimetre(s, l)) out.push({ cle: cleLigneInv(it.code, l.id), it: it, l: l }); });
   });
   return out;
@@ -2434,12 +2638,15 @@ function problemesNouvelleSession(sessions, saisie, magasins) {
   if (saisie.mg && (magasins || []).indexOf(saisie.mg) < 0) p.push('Ce magasin n\'existe pas.');
   if (saisie.aveugle && (String(saisie.tv).trim() === '' || !isFinite(num(saisie.tv)) || num(saisie.tv) < 0)) p.push('L\'écart toléré doit être un nombre positif ou nul.');
   if (saisie.aveugle && saisie.tu === 'p' && num(saisie.tv) > 100) p.push('Un écart toléré en pour cent ne peut pas dépasser 100.');
+  if (Array.isArray(saisie.cod) && !saisie.cod.length) p.push('La liste d\'articles est vide.');
+  if (Array.isArray(saisie.cod) && saisie.cod.length > SESSION_ARTICLES_MAX) p.push('Une session sur une liste accepte ' + SESSION_ARTICLES_MAX + ' articles au plus : réduis la période ou choisis un magasin.');
   return p;
 }
 /* l'enregistrement a ecrire ; l'ecart tolere n'est garde que pour une session a l'aveugle */
 function fabriquerSession(saisie, moi, maintenant) {
   var s = { nom: String(saisie.nom).trim().slice(0, 80), t0: maintenant, mg: saisie.mg || '', by: String(moi || ''), aveugle: !!saisie.aveugle };
   if (String(saisie.em || '').trim()) s.em = String(saisie.em).trim().slice(0, 80);
+  if (Array.isArray(saisie.cod) && saisie.cod.length) { var vus = {}; s.cod = saisie.cod.map(String).filter(function (c) { if (!c || vus[c]) return false; vus[c] = 1; return true; }).slice(0, SESSION_ARTICLES_MAX); }
   if (s.aveugle) { s.tv = Math.max(0, num(saisie.tv)); s.tu = saisie.tu === 'p' ? 'p' : 'u'; }
   return s;
 }
@@ -2450,7 +2657,7 @@ function fabriquerFinSession(s, moi, maintenant) {
 
 /* ----- libelles (texte pour l'affichage) ----- */
 function libelleTolerance(s) { return s.aveugle ? 'écart toléré ' + fmt(num(s.tv)) + (s.tu === 'p' ? ' %' : (num(s.tv) > 1 ? ' unités' : ' unité')) : ''; }
-function libellePerimetre(s) { return (s.mg ? 'Magasin ' + s.mg : 'Tous les magasins') + (s.em ? ' · zone ' + s.em : ''); }
+function libellePerimetre(s) { var c = codesDeSession(s); return (s.mg ? 'Magasin ' + s.mg : 'Tous les magasins') + (s.em ? ' · zone ' + s.em : '') + (c ? ' · liste de ' + c.length + ' article' + (c.length > 1 ? 's' : '') : ''); }
 function libelleModeSession(s) { return s.aveugle ? 'À l\'aveugle · ' + libelleTolerance(s) : 'Quantité attendue visible'; }
 
 /* ----- bandeaux de l'accueil et liste « Voir ce qui reste » ----- */
@@ -2490,7 +2697,7 @@ function zonesProposees(pieces, mg) {
 function lignesAveugles(sessions, it, journal, trouver) {
   var out = {}, L = linesOf(it);
   sessionsOuvertes(sessions).forEach(function (s) {
-    if (!s.aveugle) return;
+    if (!s.aveugle || !articleDansSession(s, it.code)) return;
     var cp = null;
     L.forEach(function (l) {
       if (!dansLePerimetre(s, l)) return;
@@ -2953,9 +3160,12 @@ function planRestaurationComplete(sauv, actuelles, parLigneActuel, magasinsActue
   Object.keys(sauv.items).forEach(function (k) {
     var b = sauv.items[k]; if (!b || !b.code) return;
     dansFichier[b.code] = 1;
-    var rec = clone(b); rec.t = maintenant; rec.by = moi;
+    var rec = clone(b), a = actuel[b.code]; rec.t = maintenant; rec.by = moi;
+    /* les regles exigent cb = vide, inchange ou son propre code, et db = inchange ou son propre code : l'auteur d'origine du fichier n'est pas conserve */
+    rec.cb = a && a.cb !== undefined ? a.cb : moi;
     if (b.del) { /* elle etait dans la corbeille au moment de la sauvegarde */
-      var a = actuel[b.code]; if (a && a.del) return;
+      if (a && a.del) return;
+      rec.db = moi;
       res.fiches.push(rec); res.nbRestaurees++; return;
     }
     delete rec.del; delete rec.d; delete rec.db;
@@ -3016,9 +3226,9 @@ var Reperes = (function () {
     }
   };
 })();
-/* Liens des e-mails (calcul pur) : l'adresse peut porter ?piece=<code>, ?demande=<identifiant>, ?inventaire=<identifiant> ou ?filtre=commander ; on ouvre alors directement la piece, la demande,
-   le rapport de l'inventaire ou la liste des pieces a commander.
-   search = le texte apres le « ? » de l'adresse (location.search) ; renvoie { k: 'piece' | 'demande' | 'inventaire' | 'filtre', v } ou null */
+/* Liens des e-mails (calcul pur) : l'adresse peut porter ?piece=<code>, ?demande=<identifiant>, ?inventaire=<identifiant>, ?filtre=commander ou ?peremptions=1 ; on ouvre alors directement la piece, la demande,
+   le rapport de l'inventaire, la liste des pieces a commander ou l'ecran des peremptions.
+   search = le texte apres le « ? » de l'adresse (location.search) ; renvoie { k: 'piece' | 'demande' | 'inventaire' | 'filtre' | 'peremptions', v } ou null */
 function lireLienProfond(search) {
   try {
     var q = new URLSearchParams(search), piece = q.get('piece'), demande = q.get('demande'), inventaire = q.get('inventaire');
@@ -3026,6 +3236,7 @@ function lireLienProfond(search) {
     if (inventaire) return { k: 'inventaire', v: inventaire };
     if (demande) return { k: 'demande', v: demande };
     if (q.get('filtre') === 'commander') return { k: 'filtre', v: '' };
+    if (q.get('peremptions')) return { k: 'peremptions', v: q.get('peremptions') };
   } catch (e) { /* adresse illisible : pas de lien */ }
   return null;
 }
@@ -3387,7 +3598,7 @@ function planPrixImport(jobs, fiche, aujourdhui, moi, maintenant) {
   });
   return out;
 }
-/* Utilisateurs et roles (calculs purs + module Utilisateurs). La liste des autorises (/allowed) est a la RACINE de la base : elle est commune a la production, au test et a DEV.
+/* Utilisateurs et roles (calculs purs + module Utilisateurs). La liste des autorises est PAR ENVIRONNEMENT : allowed/<espace>/<cle> (une liste pour la production, une pour le test, une pour DEV).
    Regles : un Admin fait tout ; un SecurityOfficer gere les autres roles mais ne touche pas aux Admin ; il doit toujours rester au moins un Admin. */
 var ROLES_TOUS = ['superadmin', 'admin', 'securityofficer', 'superuser', 'finance', 'inventaire', 'operateur', 'lecteur'];
 function emailDeCle(k) { return String(k).replace(/,/g, '.'); }
@@ -3463,8 +3674,8 @@ function conflitCode(code, users, allowed, cle) {
   Object.keys(allowed || {}).forEach(function (k) { var c = infoUtilisateur(allowed[k]).code; if (c && k !== cle) pris.push(c); });
   return pris.indexOf(code) > -1 ? 'Le code ' + code + ' est déjà pris : choisis-en un autre' : '';
 }
-/* alias propose a l'invitation : le premier mot du nom (le prenom), sinon la partie avant le @ de l'adresse */
-function aliasParDefaut(nom, email) { var m = String(nom || '').trim().split(/\s+/)[0]; return m || String(email || '').split('@')[0]; }
+/* alias propose a l'invitation : le premier mot du nom (le prenom) ; sans nom, rien (l'alias n'est jamais derive de l'adresse) */
+function aliasParDefaut(nom) { return String(nom || '').trim().split(/\s+/)[0]; }
 /* message ou '' : le nom d'une personne existante est obligatoire, de 1 a 80 caracteres */
 var NOM_LONGUEUR_MAX = 80;
 function controlerNom(nom) {
@@ -3481,11 +3692,23 @@ function ficheUsers(alias, auteur, maintenant) { return { alias: String(alias).t
 /* faut-il ecrire la fiche users ? nouvelle personne, fiche sans code (a completer) ou alias modifie par l'Admin (aliasInitial = valeur proposee a l'ouverture de la fiche) :
    enregistrer seulement des roles ne touche pas a l'alias, meme si l'annuaire n'a pas pu etre lu */
 function besoinUsers(nouvelle, codeExistant, aliasSaisi, aliasInitial) { return !!nouvelle || !codeExistant || String(aliasSaisi).trim() !== String(aliasInitial || '').trim(); }
+/* chemin de l'entree d'un code dans l'index de l'environnement courant : codes/<espace>/<code> */
+function cheminCodes(code) { return 'codes/' + encodeURIComponent(ENV.room) + '/' + encodeURIComponent(code); }
 /* chemin de la fiche d'une personne dans la liste de l'environnement courant : allowed/<espace>/<cle> */
 function cheminEspace(cle) { return 'allowed/' + encodeURIComponent(ENV.room) + '/' + encodeURIComponent(cle); }
 var Utilisateurs = (function () {
   var data = {}, codesEnAttente = {}; /* codes deja ecrits dans users dont la fiche allowed/<espace>/<cle> a echoue : un nouveau clic les reutilise */
   var moiCle = function () { return cleDAdresse(emailDuCompte()).cle; };
+  /* RESERVE le code dans l'index codes/<espace>/<code> = { cle } (lisible et ecrit par Admin et SecurityOfficer seulement) : deux fiches ne peuvent jamais porter le meme code.
+     Entree absente -> ecrite ; entree deja a CETTE fiche (reservation orpheline d'un essai precedent, ou personne retiree que l'on reactive) -> rien a ecrire, un PUT sur une entree existante est refuse par les regles ;
+     entree d'une AUTRE fiche -> refus. Renvoie { ok, message } */
+  var reserverCode = function (code, cle) {
+    var chemin = cheminCodes(code);
+    return Donnees.lireRacine(chemin).then(function (e) {
+      if (e && typeof e === 'object') return e.cle === cle ? { ok: true } : { ok: false, message: 'Le code ' + code + ' est déjà réservé pour une autre adresse : choisis-en un autre' };
+      return Donnees.ecrireRacine('PUT', { cle: cle }, chemin).then(function () { return { ok: true }; }, function () { return { ok: false, message: 'Le code ' + code + ' ne peut pas être réservé (déjà utilisé, ou droits) : rien n\'a été modifié' }; });
+    }, function () { return { ok: false, message: 'Impossible de réserver le code ' + code + " (réseau ?) : rien n'a été modifié" }; });
+  };
   return {
     donnees: function () { return data; },
     moiCle: moiCle,
@@ -3528,7 +3751,9 @@ var Utilisateurs = (function () {
         if (retire && !reactiver) return { ok: false, retire: { alias: retire.alias }, message: 'Ce code est celui d\'une personne retirée (alias « ' + retire.alias + ' »)' };
         if (retire) { visibles = {}; Object.keys(users).forEach(function (k) { if (k !== code) visibles[k] = users[k]; }); } /* confirmee : ce code n'est plus un obstacle ; il reste refuse s'il est anonymise ou porte par une autre fiche */
         var conflit = conflitCode(code, visibles, data, cle);
-        return conflit ? { ok: false, message: conflit } : ecrireUsers(code);
+        if (conflit) return { ok: false, message: conflit };
+        /* ordre : 1. reserver le code dans l'index codes (premier arrive = proprietaire), 2. fiche users, 3. fiche allowed */
+        return reserverCode(code, cle).then(function (r) { return r.ok ? ecrireUsers(code) : r; });
       }, function () { return { ok: false, message: 'Impossible de vérifier le code ' + code + " (réseau ?) : rien n'a été modifié" }; });
     },
     /* RETIRER L'ACCES (reversible) : users/<espace>/<code> passe a « retire » (alias garde), PUIS la fiche allowed/<espace>/<cle> est supprimee (c'est elle qui coupe l'acces) ;
@@ -3545,7 +3770,7 @@ var Utilisateurs = (function () {
       var chemin = 'users/' + encodeURIComponent(ENV.room) + '/' + encodeURIComponent(cleAnnuaire(code));
       return Donnees.lireRacine(chemin).then(function (u) {
         if (!u || typeof u !== 'object' || u.etat === 'anonymise') return supprimer();
-        var rec = ficheUsers(u.alias || aliasParDefaut(infoUtilisateur(avant).name, ''), auteurCourant(), Date.now()); rec.etat = 'retire';
+        var rec = ficheUsers(u.alias || aliasParDefaut(infoUtilisateur(avant).name), auteurCourant(), Date.now()); rec.etat = 'retire';
         return Donnees.ecrireRacine('PUT', rec, chemin).then(supprimer, function () { return { ok: false, message: "État « retiré » non enregistré (droits ? ta fiche doit avoir un code) : rien n'a été modifié" }; });
       }, function () { return { ok: false, message: "Impossible de lire la fiche users (réseau ?) : rien n'a été modifié" }; });
     },
@@ -3579,7 +3804,7 @@ var Utilisateurs = (function () {
   };
 })();
 /* E-mails : regles par evenement, envois planifies, modeles de messages (calculs purs) et le module Emails qui les lit et les ecrit dans l'espace de donnees (noeud mailrules).
-   L'envoi lui-meme est fait par le service Google (script) : il ne connait que la production et le test, pas DEV. DEV n'envoie aucun e-mail. */
+   L'envoi lui-meme est fait par le service Google (script), qui connait les trois environnements (production, test, DEV). */
 var MAIL_URL_DEFAUT = 'https://script.google.com/macros/s/AKfycbyfPAxUjCD_mYbvU59VEiB_w4_WKxtvJqex7XBmDL0HKcLv-qENTK3j3ZXdb1crulsR/exec';
 var KMAILURL = 'inventaire_mailurl_v1';
 var MAILEV = [['demande', 'Nouvelle demande d\'articles'], ['decision', 'Demande approuvée ou refusée'], ['reception', 'Réception enregistrée'], ['cloture', 'Demande clôturée'], ['seuil', 'Article sous son seuil de commande'], ['resume', 'Articles à commander après un import (récapitulatif)'], ['inventaire', 'Inventaire terminé']];
@@ -3587,13 +3812,14 @@ var MAILEV = [['demande', 'Nouvelle demande d\'articles'], ['decision', 'Demande
 var MAIL_SANS_DEMANDEUR = ['seuil', 'resume', 'inventaire'];
 var RLB = [['admin', 'Admin'], ['superuser', 'SuperUser'], ['inventaire', 'Inventaire'], ['operateur', 'Opérateur'], ['lecteur', 'Lecteur'], ['securityofficer', 'SecurityOfficer']];
 var MREC = { demande: { on: true, roles: ['admin', 'superuser'] }, decision: { on: true, req: true }, reception: { on: true, req: true }, cloture: { on: false }, seuil: { on: true, roles: ['superuser'] }, resume: { on: true, roles: ['superuser'] }, inventaire: { on: true, roles: ['admin', 'superuser'] } };
-var DOWL = ['', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'], RPL = { acommander: 'Articles à commander', demandes: 'Demandes en cours' };
+var DOWL = ['', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'], RPL = { acommander: 'Articles à commander', demandes: 'Demandes en cours', peremptions: 'Péremptions à traiter' };
 var DEF_TPL = {
   demande: { s: '[Scanpocket{env}] Nouvelle demande : {piece} ({quantite})', m: 'Bonjour {nom},\n\nNouvelle demande d\'articles de **{demandeur}** :\n\n- **{piece}** ({code})\n- Quantité : **{quantite}**\n- Destination : {destination}\n- Commentaire : {commentaire}' },
   decision: { s: '[Scanpocket{env}] Demande {decision} : {piece}', m: 'Bonjour {nom},\n\nTa demande a été **{decision}** par {decideur} :\n\n- **{piece}** ({code})\n- Quantité : {quantite}\n- Destination : {destination}\n- Motif : {motif}' },
   reception: { s: '[Scanpocket{env}] Réception enregistrée : {piece} ({recu})', m: 'Bonjour {nom},\n\nUne réception a été enregistrée par {decideur} :\n\n- **{piece}** ({code})\n- Reçu : **{recu}** sur {quantite} demandées\n- Destination : {destination}\n- Commentaire : {commentaire}' },
   cloture: { s: '[Scanpocket{env}] Demande clôturée : {piece}', m: 'Bonjour {nom},\n\nLa demande suivante a été clôturée par {decideur} :\n\n- **{piece}** ({code})\n- Quantité : {quantite}\n- Destination : {destination}' },
   sched_acommander: { s: '[Scanpocket{env}] {nb} article(s) à commander', m: 'Bonjour {nom},\n\nÉtat du {date} : **{nb}** article(s) sont sous leur seuil de commande.\n\n{liste}' },
+  sched_peremptions: { s: '[Scanpocket{env}] {nb} ligne(s) de stock périmée(s) ou proche(s) de leur date', m: 'Bonjour {nom},\n\nÉtat du {date} : **{nb}** ligne(s) de stock sont périmées ou le seront dans les **{jours}** jours.\n\n{liste}' },
   sched_demandes: { s: '[Scanpocket{env}] {nb} demande(s) en cours', m: 'Bonjour {nom},\n\nÉtat du {date} : **{nb}** demande(s) d\'articles en cours.\n\n{liste}' },
   resume: { s: '[Scanpocket{env}] {nb} article(s) à commander après {source}', m: 'Bonjour {nom},\n\nAprès {source}, **{nb}** article(s) sont sous leur seuil de commande :\n\n{liste}' },
   inventaire: { s: '[Scanpocket{env}] Inventaire terminé : {session}', m: 'Bonjour {nom},\n\nL\'inventaire **{session}** ({perimetre}) est terminé, par {par}.\n\n- Lignes comptées : **{comptees}** sur {total}\n- Non comptées : **{non}**\n- Écarts à traiter : **{ecarts}**\n- Écarts tolérés : {toleres}\n\n{liste}' },
@@ -3607,13 +3833,14 @@ var TPL_TAGS = {
   resume: ['nom', 'source', 'nb', 'liste', 'env', 'lien'],
   sched_acommander: ['nom', 'nb', 'liste', 'date', 'env', 'lien'],
   sched_demandes: ['nom', 'nb', 'liste', 'date', 'env', 'lien'],
+  sched_peremptions: ['nom', 'nb', 'jours', 'liste', 'date', 'env', 'lien'],
   seuil: ['nom', 'piece', 'code', 'stock', 'seuil', 'env', 'lien'],
   inventaire: ['nom', 'session', 'perimetre', 'par', 'comptees', 'total', 'non', 'ecarts', 'toleres', 'liste', 'env', 'lien']
 };
 /* valeurs d'exemple pour l'apercu d'un message */
 function exemplesModele(envNom) {
   return { nom: 'Marie', piece: 'Biseptine', code: '3181224191257371953', quantite: '6', recu: '4', demandeur: 'Paul', decideur: 'Jean-Pierre', decision: 'approuvée', destination: 'Pharmacie · Armoire', motif: 'OK pour la commande', commentaire: 'urgent', stock: '4', seuil: '10', source: "l'import « stock.csv »", nb: '2', session: 'Atelier octobre', perimetre: 'Magasin Atelier', par: 'Jean-Pierre', comptees: '131', total: '140', non: '9', ecarts: '4', toleres: '6',
-    liste: '- **Biseptine** : 4 (seuil 10), manque 6\n- **Colludol** : 0 (seuil 10), manque 10', date: '09/10/2026 08:00', env: envNom ? ' ' + envNom : '', lien: 'https://appscanpocket.github.io/Scanpocket/…' };
+    jours: '30', liste: '- **Biseptine** : 4 (seuil 10), manque 6\n- **Colludol** : 0 (seuil 10), manque 10', date: '09/10/2026 08:00', env: envNom ? ' ' + envNom : '', lien: 'https://appscanpocket.github.io/Scanpocket/…' };
 }
 /* remplace les {mots} d'un modele ; supprimer = une ligne dont une valeur est vide disparait */
 function remplirModele(t, v, supprimer) {
@@ -3636,11 +3863,9 @@ function descriptionDestinataires(r, utilisateurs) {
   if (!r) return 'personne';
   var p = []; if (r.req) p.push('le demandeur');
   (r.roles || []).forEach(function (x) { var l = RLB.filter(function (y) { return y[0] === x; })[0]; p.push('rôle ' + (l ? l[1] : x)); });
-  (r.people || []).forEach(function (e) { p.push(ancienneAdresse(e) ? '⚠ ancienne adresse à corriger' : nomDeCode(e, utilisateurs)); });
+  (r.people || []).forEach(function (e) { p.push(nomDeCode(e, utilisateurs)); });
   return p.length ? p.join(' · ') : 'personne';
 }
-/* les personnes d'une regle sont des CODES ; une ancienne valeur qui contient « @ » est une adresse : elle n'est jamais envoyee, a remplacer par une personne */
-function ancienneAdresse(valeur) { return String(valeur == null ? '' : valeur).indexOf('@') > -1; }
 /* nom a afficher pour un code : alias de l'annuaire, sinon nom de la fiche /allowed qui porte ce code, sinon le code */
 function nomDeCode(code, utilisateurs) {
   var a = aliasDansAnnuaire(Annuaire.lire(), code);
@@ -3667,8 +3892,7 @@ function regleVersServeur(r) {
   return o;
 }
 function planVersServeur(s) {
-  var o = { on: !!s.on, report: s.report, freq: s.freq, hour: s.hour, dow: s.dow, dom: s.dom, onlyIfAny: !!s.onlyIfAny };
-  if ((s.roles || []).length) o.roles = s.roles; if ((s.people || []).length) o.people = s.people; if (s.subject) o.subject = s.subject; if (s.msg) o.msg = s.msg;
+  var o = { on: !!s.on, report: s.report, freq: s.freq, hour: s.hour, dow: s.dow, dom: s.dom, onlyIfAny: !!s.onlyIfAny };  if ((s.roles || []).length) o.roles = s.roles; if ((s.people || []).length) o.people = s.people; if (s.subject) o.subject = s.subject; if (s.msg) o.msg = s.msg;
   return o;
 }
 function planParDefaut() { return { report: 'acommander', freq: 'week', hour: 8, dow: 1, dom: 1, onlyIfAny: true, roles: ['superuser'], people: [] }; }
@@ -4327,6 +4551,50 @@ function htmlToutDemanderPied(n) {
   return '<label class="fl" style="margin:6px 0 12px"><span class="flab">Commentaire commun (facultatif)</span><input id="adc" autocomplete="off" placeholder="S’applique à toutes les demandes"></label>' +
     '<div class="row"><button type="button" class="btn cancel" id="adx">Fermer</button><button type="button" class="btn pri" id="adv"' + (n ? '' : ' disabled') + '>Envoyer ' + n + ' demande(s)</button></div>';
 }
+/* Ecran « Peremptions » (HTML pur) : les lignes de stock perimees ou proches de leur date. r = resultat de lignesAPeremption ; un clic sur une ligne ouvre la fiche de l'article */
+function htmlPeremptionsEntete(r) {
+  var n = r.perimees.length + r.proches.length;
+  var sous = n ? (r.perimees.length + ' périmée(s), ' + r.proches.length + ' dans les ' + r.horizon + ' jours.') : 'Aucune ligne périmée ni proche de sa date (' + r.horizon + ' jours).';
+  return '<h2>Péremptions</h2><p class="sub">Lignes de stock périmées ou proches de leur date. ' + esc(sous) + '</p>';
+}
+/* r = resultat de lignesAPeremption ; reglage = horizon de l'espace ; peutRegler = Admin (champ de reglage) */
+function htmlPeremptionsCorps(r, reglage, peutRegler) {
+  var ligne = function (x) {
+    return '<li data-c="' + esc(x.it.code) + '" style="cursor:pointer"><div class="info"><b>' + esc(x.it.name) + '</b><small>' + esc(detailLignePeremption(x)) + '</small></div>' +
+      '<span class="bd" style="flex:0 0 auto;font-weight:700;color:' + (x.jours < 0 ? '#B3261E' : '#B45309') + '">' + esc(frDate(x.pe)) + '</span></li>';
+  };
+  var groupe = function (titre, liste) { return liste.length ? '<p class="hint" style="margin:12px 2px 4px;font-weight:700;color:var(--ink)">' + esc(titre) + ' (' + liste.length + ')</p><ul>' + liste.map(ligne).join('') + '</ul>' : ''; };
+  var vide = !r.perimees.length && !r.proches.length;
+  return '<label class="fl"><span class="flab">Horizon affiché</span><select id="pehz">' + htmlOptions(horizonsPeremption([r.horizon, reglage]), r.horizon) + '</select></label>' +
+    (vide ? '<ul><li class="empty">Rien à traiter pour le moment.</li></ul>' : groupe('Périmées', r.perimees) + groupe('Dans les ' + r.horizon + ' jours', r.proches)) +
+    (r.illisibles ? '<p class="hint" style="margin:12px 2px 0">' + r.illisibles + ' ligne(s) ont une date de péremption illisible (format attendu : AAAA-MM-JJ) : elles ne sont pas comptées ici.</p>' : '') +
+    (peutRegler ? '<details id="pereg"><summary style="margin-top:14px">Réglage de l\'espace : ' + esc(reglage) + ' jours</summary>' +
+      '<p class="hint">Cet horizon sert à la carte « Péremptions » de l\'accueil, au choix de départ de cet écran et à l\'e-mail planifié « Péremptions à traiter ». Le choix ci-dessus ne change que l\'affichage en cours.</p>' +
+      '<div class="row" style="align-items:flex-end"><label class="fl" style="flex:1 1 auto;margin:0"><span class="flab">Horizon (jours, de 1 à 365)</span><input id="perj" inputmode="numeric" autocomplete="off" maxlength="3" value="' + esc(reglage) + '"></label>' +
+      '<button type="button" class="btn pri" id="persv" style="flex:0 0 auto">Enregistrer</button></div></details>' : '');
+}
+function htmlPeremptionsPied(avecExport) {
+  return '<div class="row"><button type="button" class="btn cancel" id="pex">Fermer</button>' + (avecExport ? '<button type="button" class="btn" id="pexl">Export Excel</button>' : '') + '</div>';
+}
+/* Ecran « Articles dormants » (HTML pur) : deux listes calculees sur le journal local (voir socle\dormants.js). r = resultat de articlesDormants ; un clic sur une ligne ouvre la fiche */
+function htmlDormantsEntete(r) {
+  return '<h2>Articles dormants</h2><p class="sub">Articles sans mouvement, ou à recompter, depuis ' + esc(r.mois) + ' mois ou plus : ' + esc(r.aRecompter.length) + ' à recompter, ' + esc(r.sansMouvement.length) + ' sans mouvement.</p>';
+}
+function htmlDormantsCorps(r) {
+  var ligne = function (x, jamaisDernier) {
+    var detail = (x.jamais ? 'Jamais compté' : (jamaisDernier === 'comptage' ? 'Dernier comptage ' + dateHeure(x.dernier).slice(0, 10) : (x.dernier ? 'Dernier mouvement ' + dateHeure(x.dernier).slice(0, 10) : 'Aucun mouvement'))) + ' · stock ' + fmt(x.stock);
+    return '<li data-c="' + esc(x.it.code) + '" style="cursor:pointer"><div class="info"><b>' + esc(x.it.name) + '</b><small>' + esc(detail) + '</small></div>' +
+      '<span class="bd" style="flex:0 0 auto;font-weight:700;color:#B45309">' + (x.jamais ? 'jamais' : esc(x.mois) + ' mois') + '</span></li>';
+  };
+  var groupe = function (titre, liste, nature) { return liste.length ? '<p class="hint" style="margin:12px 2px 4px;font-weight:700;color:var(--ink)">' + esc(titre) + ' (' + liste.length + ')</p><ul>' + liste.map(function (x) { return ligne(x, nature); }).join('') + '</ul>' : ''; };
+  var vide = !r.aRecompter.length && !r.sansMouvement.length;
+  return '<label class="fl"><span class="flab">Depuis</span><select id="dohz">' + htmlOptions(DORMANT_MOIS_CHOIX, r.mois) + '</select></label>' +
+    (vide ? '<ul><li class="empty">Aucun article dormant pour le moment.</li></ul>' : groupe('À recompter ou jamais comptés', r.aRecompter, 'comptage') + groupe('Sans aucun mouvement depuis ' + r.mois + ' mois', r.sansMouvement, 'mouvement'));
+}
+function htmlDormantsPied(n, peutSession) {
+  return (n && peutSession ? '<div class="row"><button type="button" class="btn pri" id="dosess" style="width:100%">Créer une session d\'inventaire avec ces articles (' + n + ')</button></div>' : '') +
+    '<div class="row"><button type="button" class="btn cancel" id="dox">Fermer</button>' + (n ? '<button type="button" class="btn" id="doxl">Export Excel</button>' : '') + '</div>';
+}
 /* Formulaire d'une demande de pieces (HTML pur) : creation ou modification (quantite, commentaire, destination) d'une demande En attente.
    d = { titre, nom, info, hint, qty, note, cartes (null si une seule ligne), destination (id), envoi (libelle du bouton) } */
 function htmlFormulaireEntete(d) { return '<h2>' + esc(d.titre) + '</h2><p class="sub">' + esc(d.nom) + '</p>'; }
@@ -4467,7 +4735,7 @@ function htmlCorbeilleCorps(r, recherche, photos) {
 }
 function htmlCorbeillePied() { return '<div class="row"><button type="button" class="btn cancel" id="tx">Fermer</button></div>'; }
 /* Menu de cartes (HTML pur), commun aux Rapports et a l'Administration : des groupes avec un titre, puis une grille de cartes (icone, titre court ; l'explication est dans l'infobulle).
-   liste = [{ id, g (groupe), t (titre), c (titre court de la carte, facultatif), d (explication), zone (vrai : carte de la zone dangereuse, en bas dans un cadre rouge replie) }] dans l'ordre d'affichage ;
+   liste = [{ id, g (groupe), t (titre), c (titre court de la carte, facultatif), d (explication), zone (vrai : carte de la « Zone réservée », en bas dans un cadre rouge replie) }] dans l'ordre d'affichage ;
    attribut = attribut data- porte par chaque carte (ex. 'data-rp') ; icones = { id: trace de l'icone } ; avecId = la carte porte aussi id=<id> */
 function htmlMenuCartes(liste, attribut, icones, vide, avecId) {
   var h = '', g = null, groupe = [], zone = [];
@@ -4482,8 +4750,8 @@ function htmlMenuCartes(liste, attribut, icones, vide, avecId) {
     groupe.push(carte(r, false));
   });
   fermer();
-  /* zone dangereuse : tout en bas, repliee ; il faut la deplier pour voir les boutons */
-  if (zone.length) h += '<details class="zdanger" id="zdanger"><summary>Zone dangereuse</summary><div class="rgrid">' + zone.map(function (r) { return carte(r, true); }).join('') + '</div></details>';
+  /* « Zone réservée » (cadre rouge) : tout en bas, repliee ; il faut la deplier pour voir les boutons */
+  if (zone.length) h += '<details class="zdanger" id="zdanger"><summary>Zone réservée</summary><div class="rgrid">' + zone.map(function (r) { return carte(r, true); }).join('') + '</div></details>';
   return h || vide;
 }
 /* Champ de date francais (HTML pur) : texte jj/mm/aaaa [hh:mm] masque a la frappe (ecrans/champ_date.js), plus un bouton qui ouvre le calendrier du navigateur.
@@ -4497,6 +4765,7 @@ function valeurChamp(el) { var t = el.getAttribute('data-date'); return t === 'd
 /* Rapports (HTML pur) : le menu des rapports, les parametres et le resultat de « Valeur du stock », le pied de l'ecran */
 var ICONES_RAPPORT = {
   commander: 'M3 8l9-4 9 4-9 4-9-4zM3 8v8l9 4 9-4V8M12 12v8',
+  dormants: 'M12 8v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z',
   valeur: 'M12 3v18M16.5 7.5C15.5 6.5 14 6 12 6c-2.5 0-4 1.2-4 3s1.5 2.6 4 3 4 1.2 4 3-1.5 3-4 3c-2 0-3.5-.5-4.5-1.5',
   ecarts: 'M4 7h10M4 12h16M4 17h7M18 5v4M16 7h4',
   motifs: 'M4 6h16M4 12h10M4 18h6',
@@ -4630,11 +4899,11 @@ function htmlSessionsListe(ouvertes, terminees, termineesOuvertes) {
   return '<div class="gt">Sessions ouvertes</div>' + (ouvertes.length ? ouvertes.map(function (x) { return htmlSessionCarte(x, true); }).join('') : '<p class="hint">Aucune session ouverte.</p>') +
     (terminees.length ? '<details id="ivterm" class="ivterm"' + (termineesOuvertes ? ' open' : '') + '><summary>Terminées (' + terminees.length + ' les plus récentes)</summary>' + terminees.map(function (x) { return htmlSessionCarte(x, false); }).join('') + '</details>' : '');
 }
-function htmlNouvelleSessionEntete() { return '<h2>Nouvelle session</h2><p class="sub">Choisis le périmètre et le mode de comptage. Les autres sessions ouvertes ne sont pas touchées.</p>'; }
-function htmlInventaireNouvelle(magasins) {
+function htmlNouvelleSessionEntete(nbListe) { return '<h2>Nouvelle session</h2><p class="sub">' + (nbListe ? 'Reprend les ' + esc(nbListe) + ' article' + (nbListe > 1 ? 's' : '') + ' de la liste. Les articles sont comptés comme dans n\'importe quelle session : le journal garde les écarts.' : 'Choisis le périmètre et le mode de comptage. Les autres sessions ouvertes ne sont pas touchées.') + '</p>'; }
+function htmlInventaireNouvelle(magasins, parListe) {
   return '<label class="fl" style="margin-top:6px"><span class="flab">Nom</span><input id="ivn" autocomplete="off" maxlength="80" placeholder="ex. Atelier octobre"></label>' +
     '<label class="fl"><span class="flab">Magasin</span><select id="ivm"><option value="">Tous les magasins</option>' + magasins.map(function (n) { return '<option>' + esc(n) + '</option>'; }).join('') + '</select></label>' +
-    '<label class="fl"><span class="flab">Zone (début d\'emplacement)</span><input id="ivz" list="ivzl" autocomplete="off" maxlength="80" placeholder="facultatif, ex. R12"></label><datalist id="ivzl"></datalist>' +
+    '<label class="fl"' + (parListe ? ' style="display:none"' : '') + '><span class="flab">Zone (début d\'emplacement)</span><input id="ivz" list="ivzl" autocomplete="off" maxlength="80" placeholder="facultatif, ex. R12"></label><datalist id="ivzl"></datalist>' +
     '<label class="fl"><span class="flab">Comptage</span><select id="ivc"><option value="">Quantité attendue visible</option><option value="1">À l\'aveugle, écart révélé après la saisie</option></select></label>' +
     '<div id="ivt" style="display:none"><div class="g2"><label class="fl"><span class="flab">Écart toléré</span><input id="ivv" inputmode="decimal" value="2" autocomplete="off"></label>' +
     '<label class="fl"><span class="flab">En</span><select id="ivu"><option value="u">unités</option><option value="p">pour cent</option></select></label></div>' +
@@ -4746,15 +5015,16 @@ function htmlJournalPied(encore) {
 /* Ecran « Sauvegardes » (HTML pur) : les copies gardees sur l'appareil, et les actions. Restaurer est reserve a ceux qui ont le droit « danger ». */
 function htmlSauvegardesEntete() { return '<h2>Sauvegardes</h2><p class="sub">Les 3 dernières copies des articles et de leurs stocks sont gardées sur cet appareil (une par jour, plus celles faites avant une restauration, un import ou un effacement).</p>'; }
 /* nbCorbeille = nombre de pieces dans la corbeille, ou -1 si cette personne n'a pas acces a la corbeille */
-/* carte « Sauvegarde complete » : tout l'environnement dans un fichier (version 4, zip) ; pour le remettre : « Remettre depuis un fichier » (pied de l'ecran) ; d = { derniere (ms ou 0), maintenant } */
-function htmlCarteSauvegardeJson(d) {
+/* carte « Sauvegarde complete » : tout l'environnement dans un fichier (version 4, zip) ; pour le remettre : « Remettre depuis un fichier » (dans ce cadre, sous le bouton, si peutRestaurer) ; d = { derniere (ms ou 0), maintenant } */
+function htmlCarteSauvegardeJson(d, peutRestaurer) {
   var der = texteDerniereSauvegarde(d.derniere, d.maintenant);
   return '<div class="cadre-sv" id="svj"><h4>Sauvegarde complète<small>Uniquement sur PC</small></h4>' +
-    '<details><summary>Qu\'est-ce que c\'est ?</summary><p class="hint">Un seul fichier compressé (.zip) avec tout ce que contient cet environnement : articles (supprimés compris), lignes de stock, journal, magasins, prix, sessions d\'inventaire et réglages. Les personnes n\'y sont pas ; les photos seulement si tu coches la case. Pour le remettre : « Remettre depuis un fichier », en bas de cet écran.</p></details>' +
+    '<details><summary>Qu\'est-ce que c\'est ?</summary><p class="hint">Un seul fichier compressé (.zip) avec tout ce que contient cet environnement : articles (supprimés compris), lignes de stock, journal, magasins, prix, sessions d\'inventaire et réglages. Les personnes n\'y sont pas ; les photos seulement si tu coches la case. Pour le remettre : « Remettre depuis un fichier », dans ce cadre (il relit aussi l\'ancien fichier simple : liste d\'articles et de stocks).</p></details>' +
     '<p class="hint" id="svj_der" style="margin:0 0 8px;' + (der.ancien ? 'color:#b45309;font-weight:700' : '') + '">' + esc(der.texte) + '</p>' +
     '<p class="hint" style="margin:0 0 8px;color:var(--ink)"><b>Recommandation :</b> fais une sauvegarde complète au moins une fois par semaine, et avant toute opération importante (import, suppression en masse, restauration).</p>' +
     '<label class="hint" style="display:flex;gap:8px;align-items:center;margin:0 0 8px"><input type="checkbox" id="svj_photos" style="width:auto;min-height:0;margin:0"> Inclure les photos (fichier beaucoup plus gros)</label>' +
-    '<div class="row" style="flex-wrap:wrap"><button type="button" class="btn pri" id="svj_b" style="flex:1 1 100%">Sauvegarde complète</button></div></div>';
+    '<div class="row" style="flex-wrap:wrap"><button type="button" class="btn pri" id="svj_b" style="flex:1 1 100%">Sauvegarde complète</button></div>' +
+    (peutRestaurer ? '<div class="row" style="flex-wrap:wrap"><label class="btn" style="margin:0;flex:1 1 100%;text-align:center">Remettre depuis un fichier<input id="bi" type="file" accept=".json,.zip,application/json,application/zip" style="display:none"></label></div>' : '') + '</div>';
 }
 /* carte « Restauration exacte » (SuperAdmin) : remplace TOUT par le contenu d'une sauvegarde complete, par le service du serveur (script Google) */
 function htmlCarteRestaurationExacte() {
@@ -4770,14 +5040,13 @@ function htmlSauvegardesCorps(liste, peutRestaurer, nbCorbeille, carteJson, cart
     '<p class="hint">Elle se fait toute seule <b>une fois par jour</b> et juste avant une restauration, un import ou un effacement. Les <b>3 dernières</b> sont gardées : la plus ancienne est remplacée.</p>' +
     '<p class="hint"><b>À savoir :</b> elle disparaît si on vide le navigateur ou si on se déconnecte, et les autres appareils ne la voient pas. Pour une copie durable à ranger, utilise « Sauvegarde complète ».</p></details>' +
     '<div class="row"><button class="btn pri" id="bn" type="button" style="flex:1 1 100%">Sauvegarder maintenant</button></div>' +
-    (liste.length ? liste.map(function (s, n) {
+    (liste.length ? '<details id="svc_liste"><summary>Copies sur cet appareil (' + liste.length + ')</summary>' + liste.map(function (s, n) {
       return '<div class="snap"><div><b>' + esc(dstr(s.t)) + '</b><small>' + esc(s.why) + ', ' + s.items.length + ' réf.</small></div>' + (peutRestaurer ? '<button class="btn" data-r="' + n + '" type="button" title="Remettre les articles et stocks de cette copie">Remettre</button>' : '') + '</div>';
-    }).join('') : '<p class="hint">Aucune sauvegarde pour le moment.</p>') + '</div>';
-  return corbeille + copies + (carteJson ? htmlCarteSauvegardeJson(carteJson) : '') + (carteExacte ? htmlCarteRestaurationExacte() : '');
+    }).join('') + '</details>' : '<p class="hint">Aucune copie.</p>') + '</div>';
+  return corbeille + copies + (carteJson ? htmlCarteSauvegardeJson(carteJson, peutRestaurer) : '') + (carteExacte ? htmlCarteRestaurationExacte() : '');
 }
-function htmlSauvegardesPied(peutRestaurer) {
-  return (peutRestaurer ? '<div class="row" style="flex-wrap:wrap"><label class="btn" style="margin:0;flex:1 1 100%;text-align:center">Remettre depuis un fichier<input id="bi" type="file" accept=".json,.zip,application/json,application/zip" style="display:none"></label></div>' : '') +
-    '<div class="row" style="flex-wrap:wrap"><button class="btn cancel" id="bx" type="button" style="flex:1 1 100%">Fermer</button></div>';
+function htmlSauvegardesPied() {
+  return '<div class="row" style="flex-wrap:wrap"><button class="btn cancel" id="bx" type="button" style="flex:1 1 100%">Fermer</button></div>';
 }
 /* confirmation « forte » : il faut taper le code (heure, minute, jour : HHMMJJ) pour activer l'action */
 function htmlConfirmationCode(titre, message) {
@@ -4888,7 +5157,8 @@ function htmlRegleCorps(g) {
   var r = g.r, jours = [], heures = [], i;
   for (i = 1; i <= 28; i++) jours.push([i, String(i)]); for (i = 0; i < 24; i++) heures.push([i, i + ' h']);
   var plan = !g.planifie ? '' : '<div id="mrsch">' +
-    '<label class="fl"><span class="flab">Rapport envoyé</span><select id="mrrp">' + htmlOptions([['acommander', 'Articles à commander'], ['demandes', 'Demandes en cours']], r.report || 'acommander') + '</select></label>' +
+    '<label class="fl"><span class="flab">Rapport envoyé</span><select id="mrrp">' + htmlOptions([['acommander', 'Articles à commander'], ['demandes', 'Demandes en cours'], ['peremptions', 'Péremptions à traiter']], r.report || 'acommander') + '</select></label>' +
+    '<p class="hint" id="mrjrw" style="margin:-4px 0 8px;' + (r.report === 'peremptions' ? '' : 'display:none') + '">L\'horizon (' + esc(Peremption.jours()) + ' jours) est le réglage de l\'espace : il se modifie dans l\'écran « Péremptions » (Admin).</p>' +
     '<label class="fl"><span class="flab">Fréquence</span><select id="mrfq">' + htmlOptions([['day', 'Chaque jour'], ['week', 'Chaque semaine'], ['month', 'Chaque mois']], r.freq || 'week') + '</select></label>' +
     '<div class="g2"><label class="fl" id="mrdww" style="' + ((r.freq || 'week') === 'week' ? '' : 'display:none') + '"><span class="flab">Jour</span><select id="mrdw">' + htmlOptions(DOWL.slice(1).map(function (n, k) { return [k + 1, n.charAt(0).toUpperCase() + n.slice(1)]; }), r.dow || 1) + '</select></label>' +
     '<label class="fl" id="mrdmw" style="' + (r.freq === 'month' ? '' : 'display:none') + '"><span class="flab">Jour du mois</span><select id="mrdm">' + htmlOptions(jours, r.dom || 1) + '</select></label>' +
@@ -4899,7 +5169,6 @@ function htmlRegleCorps(g) {
     '<p class="hint" style="margin:10px 0 2px">Toutes les personnes ayant le rôle</p><div id="mrr" class="lopts">' +
     RLB.map(function (x) { return '<label class="lchk"><input type="checkbox" data-r="' + x[0] + '"' + ((r.roles || []).indexOf(x[0]) > -1 ? ' checked' : '') + '> ' + esc(x[1]) + '</label>'; }).join('') + '</div>' +
     '<p class="hint" style="margin:8px 0 2px">Des personnes précises</p><div id="mrp" class="mrpers">' +
-    ((r.people || []).some(ancienneAdresse) ? '<p class="hint" id="mrold" style="color:var(--bad);font-weight:600">⚠ ' + (r.people || []).filter(ancienneAdresse).length + ' ancienne(s) valeur(s) (adresse) ne sont plus envoyées : choisis les personnes ci-dessous puis enregistre.</p>' : '') +
     (g.personnes.length ? g.personnes.map(function (p) { return '<label class="lchk"><input type="checkbox" data-p="' + esc(p.code) + '"' + (p.sansCode ? ' disabled' : ((r.people || []).indexOf(p.code) > -1 ? ' checked' : '')) + '> ' + esc(p.nom) + ' <small>' + (p.sansCode ? 'sans code : non sélectionnable' : esc(p.code)) + '</small></label>'; }).join('') : '<p class="hint">Liste des utilisateurs indisponible.</p>') + '</div>' +
     '<p class="hint" style="margin:14px 0 2px;font-weight:700">Texte du message</p>' +
     '<label class="fl"><span class="flab">Objet</span><input id="mrsj" autocomplete="off" value="' + esc(g.sujet) + '"></label>' +
@@ -5291,6 +5560,64 @@ function clicCommander(ev) {
   if (b.getAttribute('data-allfo') !== null) { ouvrirToutDemander(b.getAttribute('data-allfo')); return; }
   var code = b.getAttribute('data-d'); if (!code) return;
   var it = Donnees.trouver(code); if (it) ouvrirDemande(it, null, 'cdlg');
+}
+/* Ecran « Peremptions » : lignes de stock perimees ou dont la date tombe dans l'horizon choisi (30 jours au depart) ; un clic ouvre la fiche ; export Excel. Calcul : lignesAPeremption. */
+var peEtat = { horizon: PEREMPTION_HORIZON };
+function ouvrirPeremptions() {
+  var d = fenetreAction('pedlg', 'peh', 'pec', 'pef');
+  if (!d.dataset.pret) { d.dataset.pret = '1'; d.addEventListener('click', clicPeremptions); d.addEventListener('change', changePeremptions); }
+  arreterScanner(); /* la camera de l'accueil est coupee derriere l'ecran */
+  peEtat.horizon = Peremption.jours(); /* choix de depart = reglage de l'espace */
+  dessinerPeremptions();
+  if (!d.open) d.showModal();
+}
+function calculPeremptions() { return lignesAPeremption(Donnees.vivantes(), Journal.contexte().parLigne, peEtat.horizon, todayIso()); }
+function dessinerPeremptions() {
+  var r = calculPeremptions(), ouvert = !!($('pereg') && $('pereg').open);
+  $('peh').innerHTML = htmlPeremptionsEntete(r); $('pec').innerHTML = htmlPeremptionsCorps(r, Peremption.jours(), peut('admin', Roles.liste())); if (ouvert && $('pereg')) $('pereg').open = true; $('pef').innerHTML = htmlPeremptionsPied(r.perimees.length + r.proches.length > 0);
+}
+function changePeremptions(ev) {
+  if (ev.target.id !== 'pehz') return;
+  peEtat.horizon = Number(ev.target.value) || PEREMPTION_HORIZON; dessinerPeremptions();
+}
+function clicPeremptions(ev) {
+  var b = ev.target.closest('button');
+  if (b && b.id === 'pex') { $('pedlg').close(); return; }
+  if (b && b.id === 'persv') {
+    Peremption.ecrire($('perj').value).then(function (r) {
+      toast(r.message); if (!r.ok) return;
+      peEtat.horizon = Peremption.jours(); dessinerPeremptions(); majBlocs(); /* la carte de l'accueil suit le nouveau reglage */
+    });
+    return;
+  }
+  if (b && b.id === 'pexl') { telechargerTableur(lignesTableurPeremptions(calculPeremptions()), 'peremptions-' + jourFichier() + '.xlsx'); return; }
+  var li = ev.target.closest('li[data-c]'); if (li) ouvrirPiece(li.getAttribute('data-c'));
+}
+/* Ecran « Articles dormants » : sans mouvement / a recompter depuis N mois (6 au depart), export Excel, et « Creer une session d'inventaire avec ces articles ». Calcul : articlesDormants. */
+var doEtat = { mois: DORMANT_MOIS };
+function ouvrirDormants() {
+  var d = fenetreAction('dodlg', 'doh', 'doc', 'dof');
+  if (!d.dataset.pret) { d.dataset.pret = '1'; d.addEventListener('click', clicDormants); d.addEventListener('change', changeDormants); }
+  arreterScanner(); /* la camera de l'accueil est coupee derriere l'ecran */
+  doEtat.mois = DORMANT_MOIS;
+  dessinerDormants();
+  if (!d.open) d.showModal();
+}
+function calculDormants() { var c = Journal.contexte(); return articlesDormants(Donnees.vivantes(), c.lignes || [], c.stocks, doEtat.mois, Date.now()); }
+function dessinerDormants() {
+  var r = calculDormants(), codes = codesDormants(r);
+  $('doh').innerHTML = htmlDormantsEntete(r); $('doc').innerHTML = htmlDormantsCorps(r); $('dof').innerHTML = htmlDormantsPied(codes.length, peut('invsession', Roles.liste()));
+}
+function changeDormants(ev) {
+  if (ev.target.id !== 'dohz') return;
+  doEtat.mois = Number(ev.target.value) || DORMANT_MOIS; dessinerDormants();
+}
+function clicDormants(ev) {
+  var b = ev.target.closest('button');
+  if (b && b.id === 'dox') { $('dodlg').close(); return; }
+  if (b && b.id === 'doxl') { telechargerTableur(lignesTableurDormants(calculDormants()), 'articles-dormants-' + jourFichier() + '.xlsx'); return; }
+  if (b && b.id === 'dosess') { ouvrirNouvelleSession({ cod: codesDormants(calculDormants()), nom: 'Articles dormants - ' + frDate(todayIso()) }); return; }
+  var li = ev.target.closest('li[data-c]'); if (li) ouvrirPiece(li.getAttribute('data-c'));
 }
 /* Ecran « Tout demander » : envoie d'un coup une demande pour chaque piece cochee de « Pieces a commander », chacune vers sa destination habituelle. */
 var toutEtat = null;
@@ -5877,10 +6204,13 @@ function ouvrirInventaire() {
   if (!d.open) d.showModal();
 }
 /* formulaire d'une nouvelle session, dans sa propre fenetre (la liste des sessions n'est pas poussee vers le bas) */
-function ouvrirNouvelleSession() {
+var ivListe = null; /* liste d'articles de la session en preparation (depuis « Articles dormants »), sinon null */
+function ouvrirNouvelleSession(opts) {
   var d = fenetreAction('ivndlg', 'ivnh', 'ivnc', 'ivnf');
   if (!d.dataset.pret) { d.dataset.pret = '1'; d.addEventListener('click', clicNouvelleSession); d.addEventListener('change', changeInventaire); }
-  $('ivnh').innerHTML = htmlNouvelleSessionEntete(); $('ivnc').innerHTML = htmlInventaireNouvelle(Magasins.liste()); $('ivnf').innerHTML = htmlNouvelleSessionPied();
+  ivListe = opts && opts.cod && opts.cod.length ? opts.cod.slice() : null;
+  $('ivnh').innerHTML = htmlNouvelleSessionEntete(ivListe ? ivListe.length : 0); $('ivnc').innerHTML = htmlInventaireNouvelle(Magasins.liste(), !!ivListe); $('ivnf').innerHTML = htmlNouvelleSessionPied();
+  if (ivListe && opts.nom) $('ivn').value = opts.nom;
   majZonesProposees();
   if (!d.open) d.showModal();
 }
@@ -5895,10 +6225,11 @@ function dessinerSessions() {
   $('ivl').innerHTML = htmlSessionsListe(toutes.filter(function (x) { return !x.fin; }), toutes.filter(function (x) { return x.fin; }).slice(0, 5), depliees);
 }
 function demarrerSession() {
-  var saisie = { nom: $('ivn').value, mg: $('ivm').value, em: $('ivz').value, aveugle: $('ivc').value === '1', tv: $('ivv').value, tu: $('ivu').value };
+  var saisie = { nom: $('ivn').value, mg: $('ivm').value, em: ivListe ? '' : $('ivz').value, aveugle: $('ivc').value === '1', tv: $('ivv').value, tu: $('ivu').value };
+  if (ivListe) saisie.cod = ivListe;
   Inventaires.demarrer(saisie).then(function (r) {
     toast(r.message);
-    if (r.ok) { $('ivndlg').close(); dessinerSessions(); }
+    if (r.ok) { $('ivndlg').close(); ivListe = null; if ($('dodlg') && $('dodlg').open) $('dodlg').close(); if ($('ivl')) dessinerSessions(); }
   });
 }
 /* prix d'achat d'une piece pour la valeur des ecarts, ou null (role sans droit sur les prix) */
@@ -6113,7 +6444,8 @@ function ouvrirSauvegardes() {
 function dessinerSauvegardes() {
   var r = peut('danger', Roles.liste());
   var corbeille = peut('fiche', Roles.liste()) ? Donnees.brutes().filter(function (p) { return p.del; }).length : -1;
-  $('bc').innerHTML = htmlSauvegardesCorps(Sauvegardes.liste(), r, corbeille, r ? { derniere: derniereSauvegardeEffective(), maintenant: Date.now() } : null, peut('purge', Roles.liste())); $('bf').innerHTML = htmlSauvegardesPied(r);
+  var ouvert = !!($('svc_liste') && $('svc_liste').open); /* le repli de la liste des copies reste ouvert si on l'a ouvert */
+  $('bc').innerHTML = htmlSauvegardesCorps(Sauvegardes.liste(), r, corbeille, r ? { derniere: derniereSauvegardeEffective(), maintenant: Date.now() } : null, peut('purge', Roles.liste())); $('bf').innerHTML = htmlSauvegardesPied(); if (ouvert && $('svc_liste')) $('svc_liste').open = true;
 }
 /* remet les pieces et leurs stocks d'une source simple (copie de l'appareil ou ancien fichier) apres confirmation */
 function restaurerListe(liste, quoi) {
@@ -6437,7 +6769,7 @@ function dessinerUtilisateurs() {
 function saisieFiche(ev) {
   var e = utEtat, f = e.fiche;
   if (ev.target.id === 'uda') f.aliasModifie = true;
-  else if (ev.target.id === 'udn' && f.nouvelle && !f.aliasModifie && $('uda')) $('uda').value = aliasParDefaut($('udn').value, $('ude') ? $('ude').value : '');
+  else if (ev.target.id === 'udn' && f.nouvelle && !f.aliasModifie && $('uda')) $('uda').value = aliasParDefaut($('udn').value);
 }
 function filtreUtilisateurs(ev) {
   if (utEtat && utEtat.vue === 'fiche') { saisieFiche(ev); return; }
@@ -6451,7 +6783,7 @@ function ouvrirFichePersonne(cle) {
   if (cle) {
     var i = infoUtilisateur(Utilisateurs.donnees()[cle]), dr = droitsFiche(cle, i.roles, moi, mesRoles);
     var connu = i.code ? aliasDansAnnuaire(Annuaire.lire(), i.code) : undefined;
-    e.fiche = { cle: cle, nouvelle: false, email: emailDeCle(cle), nom: i.name, code: i.code, aliasActuel: connu, alias: connu !== undefined ? connu : aliasParDefaut(i.name, emailDeCle(cle)), roles: i.roles, droits: dr,
+    e.fiche = { cle: cle, nouvelle: false, email: emailDeCle(cle), nom: i.name, code: i.code, aliasActuel: connu, alias: connu !== undefined ? connu : aliasParDefaut(i.name), roles: i.roles, droits: dr,
       aide: dr.verrouillee ? 'Réservé aux Admin : tu ne peux pas modifier cette personne.' : (dr.soi ? "C'est ton compte : tu ne peux pas te retirer ni retirer ton propre rôle Admin." : '') +
         (i.code ? '' : (dr.soi ? ' ' : '') + "Fiche sans code : enregistre-la pour lui donner un code et choisir son alias.") };
   } else {
@@ -6467,7 +6799,7 @@ function enregistrerPersonne() {
     email = adresseNormalisee($('ude').value);
     if (!emailValide(email)) { toast('E-mail invalide'); return; }
     var ca = cleDAdresse(email); if (ca.erreur) { toast(ca.erreur); return; } /* aucune ecriture : l'adresse ne peut pas servir de cle */
-    cle = ca.cle; nom = nom || email.split('@')[0];
+    cle = ca.cle; msg0 = controlerNom(nom); if (msg0) { toast(msg0); return; } /* le nom est obligatoire : jamais derive de l'adresse */
   } else if (f.droits.verrouillee) nom = f.nom; /* fiche en lecture seule */
   else { msg0 = controlerNom(nom); if (msg0) { toast(msg0); return; } } /* le nom d'une personne existante peut etre corrige (faute de frappe) */
   var avant = f.nouvelle ? [] : f.roles, superadmin = (avant.indexOf('superadmin') > -1) !== (roles.indexOf('superadmin') > -1);
@@ -6655,6 +6987,7 @@ function changeRegle(ev) {
   var t = ev.target, ed = edEtat; if (!ed) return;
   if (t.id === 'mrfq') { $('mrdww').style.display = t.value === 'week' ? '' : 'none'; $('mrdmw').style.display = t.value === 'month' ? '' : 'none'; return; }
   if (t.id === 'mrrp') {
+    $('mrjrw').style.display = t.value === 'peremptions' ? '' : 'none'; /* l'horizon n'existe que pour les peremptions */
     /* le modele par defaut suit le rapport choisi, tant que le texte n'a pas ete change */
     var ancien = DEF_TPL[ed.tk] || { s: '', m: '' }, nk = 'sched_' + t.value, neuf = DEF_TPL[nk];
     if (neuf && $('mrsj').value === ancien.s && $('mrmsg').value === ancien.m) { $('mrsj').value = neuf.s; $('mrmsg').value = neuf.m; }
@@ -6668,7 +7001,7 @@ function clicRegle(ev) {
   if (b.id === 'mrx') { $('mrdlg').close(); return; }
   if (b.id === 'mrrs') { var d0 = DEF_TPL[ed.tk]; if (d0) { $('mrsj').value = d0.s; $('mrmsg').value = d0.m; $('mrpvb').style.display = 'none'; } return; }
   if (b.id === 'mrpv') {
-    var v = exemplesModele(nomEnvMail()), msg = $('mrmsg').value, bouton = /\{lien\}/.test(msg) ? '' : (ed.tk === 'seuil' ? "Ouvrir l'article" : (ed.tk === 'resume' || ed.tk === 'sched_acommander' ? 'Voir les articles à commander' : (ed.tk === 'sched_demandes' ? "Ouvrir l'application" : (ed.tk === 'inventaire' ? 'Ouvrir le rapport' : 'Ouvrir la demande'))));
+    var v = exemplesModele(nomEnvMail()), msg = $('mrmsg').value, bouton = /\{lien\}/.test(msg) ? '' : (ed.tk === 'seuil' ? "Ouvrir l'article" : (ed.tk === 'resume' || ed.tk === 'sched_acommander' ? 'Voir les articles à commander' : (ed.tk === 'sched_demandes' || ed.tk === 'sched_peremptions' ? "Ouvrir l'application" : (ed.tk === 'inventaire' ? 'Ouvrir le rapport' : 'Ouvrir la demande'))));
     $('mrpvb').style.display = ''; $('mrpvb').innerHTML = htmlApercuMail(remplirModele($('mrsj').value, v, false), remplirModele(msg, v, true), bouton); return;
   }
   if (b.id === 'mrdel') {
@@ -6684,8 +7017,7 @@ function clicRegle(ev) {
   if (ed.planifie) {
     if (!roles.length && !gens.length) { toast('Choisis au moins un destinataire'); return; }
     var prev = e.planifies[ed.id] || {};
-    var plan = { on: prev.on === undefined ? true : !!prev.on, report: $('mrrp').value, freq: $('mrfq').value, hour: Number($('mrhr').value), dow: Number($('mrdw').value), dom: Number($('mrdm').value), onlyIfAny: $('mroi').checked, roles: roles, people: gens };
-    if (sj && sj !== def.s) plan.subject = sj; if (mg && mg !== def.m) plan.msg = mg;
+    var plan = { on: prev.on === undefined ? true : !!prev.on, report: $('mrrp').value, freq: $('mrfq').value, hour: Number($('mrhr').value), dow: Number($('mrdw').value), dom: Number($('mrdm').value), onlyIfAny: $('mroi').checked, roles: roles, people: gens };    if (sj && sj !== def.s) plan.subject = sj; if (mg && mg !== def.m) plan.msg = mg;
     Emails.ecrirePlan(ed.id, plan).then(function () { e.planifies[ed.id] = plan; $('mrdlg').close(); messageEmails('Envoi planifié enregistré.'); dessinerEmails(); }).catch(function () { toast('Enregistrement impossible (droits Admin requis)'); });
     return;
   }
@@ -7110,6 +7442,7 @@ function clicRapports(ev) {
     var id = b.getAttribute('data-rp');
     if (id === 'valeur') { e.vue = 'valeur'; dessinerRapports(); return; }
     if (id === 'commander') { ouvrirCommander(); return; }
+    if (id === 'dormants') { ouvrirDormants(); return; }
     e.rapport = id; e.vue = 'par'; dessinerRapports(); return;
   }
   if (e.vue !== 'valeur') return;
@@ -7180,7 +7513,7 @@ function peindreMiniatures(racine) {
 /* donnees des blocs « À traiter » et « Mes dernières tâches » (calculees par accueil_taches.js) */
 function donneesBlocs(roles) {
   var ctx = Journal.contexte(), moi = auteurCourant();
-  var cartes = cartesATraiter(roles, moi, ctx.demandes, Donnees.vivantes(), ctx.stocks);
+  var cartes = cartesATraiter(roles, moi, ctx.demandes, Donnees.vivantes(), ctx.stocks, ctx.parLigne, todayIso(), Peremption.jours());
   var taches = dernieresTaches(ctx.lignes || [], moi).map(function (x) {
     var it = Donnees.trouver(x.code);
     return { code: x.code, texte: texteTache(x, it ? it.name : x.code), titre: typeMouvement(x).titre, piece: it ? it.name : x.code, quand: dstr(x.t) + ' · ' + aliasDe(x.by || ''), icone: ICONE_TACHE[x.type] || 'fiche' };
@@ -7206,6 +7539,7 @@ function brancherBlocs() {
     if (carte) {
       var id = carte.getAttribute('data-h');
       if (id === 'cmd') ouvrirCommander();
+      else if (id === 'per') ouvrirPeremptions();
       else if (id === 'sav') ouvrirSauvegardes(); /* « Sauvegarde complete a faire » : on ouvre l'ecran ou se trouve le bouton */
       else if (id === 'att') ouvrirDemandes(peut('decide', Roles.liste()) ? 'attente' : '');
       else ouvrirDemandes('approuvee'); /* rec : demandes a receptionner */
@@ -7303,6 +7637,7 @@ function essayerLien() {
     return;
   }
   if (!synchro) return;
+  if (d.k === 'peremptions') { lienFini(); if (peut('inv', Roles.liste())) ouvrirPeremptions(); else toast('Les péremptions sont réservées à Admin, SuperUser et Inventaire'); return; }
   if (d.k === 'inventaire') { /* rapport de la session : attend que la session et les pieces soient connues */
     var s = Inventaires.parId(d.v);
     if (!s) { if (Inventaires.estCharge()) { lienFini(); toast('Inventaire introuvable'); } return; }
@@ -7367,7 +7702,7 @@ function brancherChampsDate() {
   document.addEventListener('change', function (ev) { if (ev.target.getAttribute && ev.target.hasAttribute('data-calsel')) { ev.stopPropagation(); choisirDateCalendrier(ev.target); } }, true);
 }
 /* Coquille de l'application : choisit l'ecran selon l'etat d'acces (etatAcces), tient la synchro periodique et la mise en veille */
-var VERSION = '1.0.43';
+var VERSION = '1.0.45';
 
 /* accueil : scanner, blocs « A traiter » / valeur / taches (selon le role), liste des pieces, barre du bas */
 function htmlAccueil(auth, roles) {
@@ -7473,8 +7808,8 @@ function demarrer() {
     var bar = $('errbar'); if (!bar) { bar = document.createElement('div'); bar.id = 'errbar'; document.body.insertBefore(bar, document.body.firstChild); }
     bar.textContent = 'Erreur : ' + e.message + (e.filename ? ' (' + String(e.filename).split('/').pop() + ':' + e.lineno + ')' : '');
   });
-  Donnees.surChangement(function () { majEntete(); majListe(); majBlocs(); essayerLien(); });
-  Journal.surChangement(function () { majListe(); majBlocs(); redessinerPiece(); redessinerFenetresDemande(); redessinerHistorique(); redessinerRapports(); redessinerJournal(); majBandeauxInventaire(); });
+  Donnees.surChangement(function () { majEntete(); majListe(); majBlocs(); essayerLien(); Badge.maj(); });
+  Journal.surChangement(function () { Badge.maj(); majListe(); majBlocs();redessinerPiece(); redessinerFenetresDemande(); redessinerHistorique(); redessinerRapports(); redessinerJournal(); majBandeauxInventaire(); });
   Inventaires.surChangement(majBandeauxInventaire);
   Prix.surChangement(function () { redessinerPiece(); redessinerRapports(); });
   window.addEventListener('online', function () { majEntete(); Donnees.synchroniser(); });
